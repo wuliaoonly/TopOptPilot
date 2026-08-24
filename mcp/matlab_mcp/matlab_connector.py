@@ -80,6 +80,7 @@ class MatlabConnector:
             if not self.matlab_root:
                 raise MatlabMcpError("MATLAB installation was not found on PATH")
             started_at = time.monotonic()
+            self.stderr.clear()
             args = [str(self.binary), f"--matlab-root={self.matlab_root}",
                     f"--initial-working-folder={self.adapter_dir}",
                     "--matlab-display-mode=nodesktop", "--matlab-session-mode=auto",
@@ -98,15 +99,21 @@ class MatlabConnector:
             )
             threading.Thread(target=self._stdout_loop, daemon=True).start()
             threading.Thread(target=self._stderr_loop, daemon=True).start()
-            self.request("initialize", {
-                "protocolVersion": self.PROTOCOL_VERSION, "capabilities": {},
-                "clientInfo": {"name": "TopOptPilot", "version": "6.0.0"},
-            }, timeout=30)
-            self.notify("notifications/initialized", {})
-            listing = self.request("tools/list", {}, timeout=30)
-            self.tools = {item["name"] for item in listing.get("tools", [])}
-            if "topopt_run_task" not in self.tools:
-                raise MatlabMcpError("Restricted topopt_run_task tool was not registered")
+            try:
+                self.request("initialize", {
+                    "protocolVersion": self.PROTOCOL_VERSION, "capabilities": {},
+                    "clientInfo": {"name": "TopOptPilot", "version": "6.0.0"},
+                }, timeout=30)
+                self.notify("notifications/initialized", {})
+                listing = self.request("tools/list", {}, timeout=30)
+                self.tools = {item["name"] for item in listing.get("tools", [])}
+                if "topopt_run_task" not in self.tools:
+                    raise MatlabMcpError("Restricted topopt_run_task tool was not registered")
+            except Exception as exc:
+                details = " | ".join(item for item in self.stderr[-5:] if item).strip()
+                self.stop()
+                suffix = f"; MCP stderr: {details[:1200]}" if details else ""
+                raise MatlabMcpError(f"MATLAB MCP startup failed: {exc}{suffix}") from exc
             self.startup_ms = round((time.monotonic() - started_at) * 1000)
             return self
 
@@ -131,7 +138,8 @@ class MatlabConnector:
     def notify(self, method: str, params: dict[str, Any]) -> None:
         self._write({"jsonrpc": "2.0", "method": method, "params": params})
 
-    def call_topopt(self, task_path: Path, result_path: Path) -> dict:
+    def call_topopt(self, task_path: Path, result_path: Path,
+                    timeout: float | None = None) -> dict:
         task_path, result_path = task_path.resolve(), result_path.resolve()
         if (not self.job_root or self.job_root not in task_path.parents
                 or self.job_root not in result_path.parents
@@ -139,7 +147,8 @@ class MatlabConnector:
             raise MatlabMcpError("MATLAB task/result paths must share a job directory under the research data root")
         self.start()
         response = self.request("tools/call", {"name": "topopt_run_task", "arguments": {
-            "task_json_path": str(task_path), "result_json_path": str(result_path)}})
+            "task_json_path": str(task_path), "result_json_path": str(result_path)}},
+            timeout=timeout)
         if response.get("isError"):
             message = " ".join(str(item.get("text", "")) for item in response.get("content", []))
             raise MatlabMcpError(message or "MATLAB custom tool failed")
@@ -173,7 +182,7 @@ class MatlabConnector:
         return self.health()
 
     def configure(self, *, matlab_root: str | Path | None = None,
-                  timeout: float | None = None) -> dict[str, Any]:
+                  timeout: float | None = None, start: bool = True) -> dict[str, Any]:
         """Apply controlled runtime settings; callers cannot alter MCP tool access."""
         with self._start_lock:
             if matlab_root is not None:
@@ -185,7 +194,9 @@ class MatlabConnector:
             if timeout is not None:
                 self.timeout = float(timeout)
             self.stop()
-        return self.restart()
+        if start:
+            self.start()
+        return self.health()
 
     def _write(self, payload: dict[str, Any]) -> None:
         if not self.process or not self.process.stdin:

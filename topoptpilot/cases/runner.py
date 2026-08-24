@@ -22,12 +22,12 @@ class EvidenceCaseRunner:
         case_id = case_id.upper()
         definition = self._definition(case_id)
         research = self.service.create_research({
-            "name": definition["name"], "goal": definition["goal"], "mode": "CONTROLLED",
+            "name": definition["name"], "goal": definition["goal"], "mode": "AUTONOMOUS",
             "geometry": definition["geometry"], "constraints": definition["constraints"],
             "material": definition.get("material", {}), "loads": definition.get("loads", []),
             "boundary_conditions": definition.get("boundary_conditions", {}),
             "hypothesis": definition["hypothesis"], "budget_total": 12,
-            "budgets": {"total": 12, "f0": 8, "f1": 2, "f2": 1, "f3": 1},
+            "budgets": {"total": 12},
         })
         rid = research["id"]
         if case_id == "A": self._case_a(rid)
@@ -47,9 +47,9 @@ class EvidenceCaseRunner:
         # those that are still above the limit) as the REDUCE continuation seed.
         best = min(explored, key=lambda item: item["result"]["quality"].get("gray_ratio", 1.0))
         # Projection continuation: keep sharpening beta until the Evaluator marks
-        # the design feasible or the F0 budget is exhausted. This is the "AI
+        # the design feasible or the total experiment budget is exhausted. This is the "AI
         # improves effectiveness across rounds" loop the cases demonstrate.
-        budget_after_explore = 8 - 1 - len(explored)
+        budget_after_explore = 12 - 1 - len(explored)
         best_gray = float(best["result"]["quality"].get("gray_ratio", 1.0))
         for _ in range(budget_after_explore):
             if best["status"] == "SUCCESS":
@@ -98,16 +98,14 @@ class EvidenceCaseRunner:
                    if feasible else min(explored, key=lambda item: (
                        item["result"]["quality"].get("connected_components", 1) != 1,
                        item["result"]["quality"].get("gray_ratio", 1))))
-        budget_after_explore = 8 - 1 - len(explored)
+        budget_after_explore = 12 - 1 - len(explored)
         for _ in range(budget_after_explore):
             if current["status"] == "SUCCESS": break
             refined = self._intent(rid, "REDUCE_GRAYNESS", source_experiment=current["id"])
             if not refined: break
             current = refined[0]
-        for _ in range(3):
-            values = self._intent(rid, "UPGRADE_FIDELITY", source_experiment=current["id"],
-                                  approve=True)
-            if not values: break
+        values = self._intent(rid, "VERIFY_CANDIDATE", source_experiment=current["id"])
+        if values:
             current = values[0]
 
     def _intent(self, rid: str, intent: str, approve: bool = False, **arguments) -> list[dict]:

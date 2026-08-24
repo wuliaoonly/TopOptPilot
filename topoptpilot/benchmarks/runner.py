@@ -55,7 +55,8 @@ class BenchmarkRunner:
                     r["quality"]["connected_components"] == 1
                     and r["quality"]["gray_ratio"] <= .05
                     and abs(r["constraints"]["volume_fraction"] - .4) <= .02 else "FAILED"),
-                    "fidelity": "F0", "parameters": r["parameters"],
+                    "dimension": 2, "solver_profile": {"grid": [96, 32], "accuracy": "standard"},
+                    "backend": "development_python_regression", "parameters": r["parameters"],
                     "result": {"objective": r["objective"], "constraints": r["constraints"],
                                "quality": r["quality"]}}
                    for i, r in enumerate(runs, 1)]
@@ -78,8 +79,7 @@ class BenchmarkRunner:
 
     def run_pi_campaign(self, service, budget: int = 5, timeout: float = 180) -> dict:
         research = service.create_research({"name": "Pi baseline", "mode": "AUTONOMOUS",
-            "budget_total": budget, "budgets": {"total": budget, "f0": budget,
-                                                   "f1": 0, "f2": 0, "f3": 0}})
+            "budget_total": budget, "budgets": {"total": budget}})
         service.start_autonomous_research(research["id"])
         deadline = time.time() + timeout
         while time.time() < deadline:
@@ -105,7 +105,7 @@ class BenchmarkRunner:
     def ablations(self) -> dict:
         return {"no_scientific_memory": self.candidates("Random", 5),
                 "no_safety_policy": [{"beta": 32, "rmin": .75, "penal": 5}],
-                "no_fidelity_manager": self.candidates("Grid", 5),
+                "no_solver_profile_policy": self.candidates("Grid", 5),
                 "no_warm_start": self.candidates("Rule", 5)}
 
     @staticmethod

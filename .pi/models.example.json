@@ -1,7 +1,7 @@
 {
   "providers": {
-    "dashscope": {
-      "baseUrl": "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+    "openai-compatible": {
+      "baseUrl": "https://api.ai-pixel.online/v1",
       "api": "openai-completions",
       "apiKey": "$DASHSCOPE_API_KEY",
       "authHeader": true,
@@ -12,8 +12,8 @@
       },
       "models": [
         {
-          "id": "qwen3.7-plus",
-          "name": "Qwen 3.7 Plus",
+          "id": "deepseek-v4-flash",
+          "name": "DeepSeek V4 Flash",
           "reasoning": true,
           "input": ["text", "image"],
           "contextWindow": 1000000,
@@ -23,4 +23,3 @@
     }
   }
 }
-

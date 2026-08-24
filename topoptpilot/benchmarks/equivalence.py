@@ -25,13 +25,14 @@ def run_equivalence_gate(worker: Any, *, dimension: int = 2,
     if dimension == 3:
         common["params"].update({"grid3d": [4, 2, 2]})
         mesh = "coarse3d"
-        fidelity = "F2"
-    else:
-        fidelity = "F0"
 
     def run(variant: str, suffix: str) -> dict[str, Any]:
-        task = {**common, "task_id": f"eq-{suffix}", "mesh_level": mesh,
-                "fidelity": fidelity, "solver_variant": variant}
+        grid = common["params"].get("grid3d", [48, 16])
+        task = {**common, "task_id": f"eq-{suffix}", "mesh_level": "direct",
+                "fidelity": "DIRECT", "dimension": dimension,
+                "solver_profile": {"grid": grid, "accuracy": "verification",
+                                   "variant": variant, "acceleration_mode": "vectorized_cpu",
+                                   "max_iterations": 3}, "solver_variant": variant}
         return worker.run(task, "EQUIVALENCE", f"E{suffix}")
 
     reference = run("reference_cpu", "ref")

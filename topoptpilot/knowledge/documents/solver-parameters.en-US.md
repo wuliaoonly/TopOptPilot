@@ -1,3 +1,3 @@
-# MATLAB solver parameters and fidelities
+# MATLAB solver parameters and direct profiles
 
-`volfrac`, `penal`, `rmin`, `beta` and `max_iter` are compiled by Policy. F0 is coarse MATLAB 2D, F1 fine MATLAB 2D, F2 coarse MATLAB 3D and F3 high-accuracy MATLAB 3D. F3 requires human approval. Production experiments never fall back to Python solvers.
+`volfrac`, `penal`, `rmin`, `beta` and `max_iter` are compiled by Policy. The Research Contract fixes 2D or 3D. Policy selects the actual grid, accuracy, variant, acceleration and iteration limit from the question, budget and machine capabilities. COPILOT waits for confirmation; AUTONOMOUS runs after Safety and Budget pass. Production experiments use MATLAB MCP and never fall back to Python.

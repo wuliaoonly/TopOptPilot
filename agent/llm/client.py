@@ -18,11 +18,31 @@ from typing import Any
 from dotenv import load_dotenv
 from pi_agent.agent_core import Agent, AgentState, AssistantMessage, Model, TextContent
 from pi_agent.pi_ai import create_agent_stream_fn, create_default_registry
+from urllib.parse import urlparse, urlunparse
 
 logger = logging.getLogger("TopOptPilot.PiAgent")
 
-DEFAULT_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
-DEFAULT_MODEL = "qwen3.7-plus"
+DEFAULT_BASE_URL = "https://api.ai-pixel.online/v1"
+DEFAULT_MODEL = "deepseek-v4-flash"
+
+
+def normalize_base_url(url: str) -> str:
+    """Return an OpenAI-compatible base URL with an explicit /v1 path.
+
+    Aggregator gateways (One-API style) answer bare-host requests with their
+    HTML landing page instead of a JSON completion, which the SDK parses as
+    an empty stream. Providers that already expose /v1 (DashScope compatible
+    mode, OpenAI, DeepSeek) are left untouched.
+    """
+    stripped = (url or "").strip().rstrip("/")
+    if not stripped:
+        return stripped
+    parsed = urlparse(stripped)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return stripped
+    if parsed.path.endswith("/v1"):
+        return stripped
+    return urlunparse(parsed._replace(path=parsed.path.rstrip("/") + "/v1"))
 
 
 class PiAgentClient:
@@ -34,8 +54,9 @@ class PiAgentClient:
                  model: str | None = None, max_retries: int = 3,
                  timeout: int = 120, event_callback: Callable[[dict], None] | None = None):
         load_dotenv()
-        self.api_key = api_key or os.getenv("DASHSCOPE_API_KEY") or os.getenv("LLM_API_KEY", "")
-        self.base_url = base_url or os.getenv("QWEN_BASE_URL", DEFAULT_BASE_URL)
+        self.api_key = (api_key or os.getenv("DASHSCOPE_API_KEY") or
+                        os.getenv("OPENAI_API_KEY") or os.getenv("LLM_API_KEY", ""))
+        self.base_url = normalize_base_url(base_url or os.getenv("QWEN_BASE_URL", DEFAULT_BASE_URL))
         self.model = model or os.getenv("QWEN_MODEL", DEFAULT_MODEL)
         self.max_retries = max(1, max_retries)
         self.timeout = timeout
@@ -50,7 +71,7 @@ class PiAgentClient:
         """
         del temperature, max_tokens
         if not self.api_key:
-            return self._degraded(response_format, "DASHSCOPE_API_KEY is not configured")
+            return self._degraded(response_format, "OpenAI-compatible API credential is not configured")
 
         last_error: str | None = None
         for attempt in range(1, self.max_retries + 1):
@@ -67,8 +88,8 @@ class PiAgentClient:
     async def _chat_async(self, messages: list[dict[str, Any]],
                           response_format: dict | None) -> dict[str, Any]:
         system_prompt, prompt = _build_prompt(messages, response_format)
-        model = Model(id=self.model, provider="dashscope", api="openai-completions",
-                      base_url=self.base_url, reasoning=False)
+        model = Model(id=self.model, provider="openai-compatible", api="openai-completions",
+                      base_url=normalize_base_url(self.base_url), reasoning=False)
         state = AgentState(system_prompt=system_prompt, model=model, thinking_level="off")
         registry = create_default_registry()
         agent = Agent(
@@ -95,7 +116,12 @@ class PiAgentClient:
             block.text for block in assistant.content if isinstance(block, TextContent)
         ).strip()
         if not content:
-            raise RuntimeError("PiAgent returned an empty final response")
+            thinking = "\n".join(
+                getattr(block, "thinking", "") for block in assistant.content
+            ).strip()
+            hint = ("; the model produced only reasoning content"
+                    if thinking else "; verify the base URL resolves to an OpenAI-compatible /v1 endpoint")
+            raise RuntimeError(f"PiAgent returned an empty final response{hint}")
         usage = assistant.usage
         return {
             "success": True,
@@ -131,7 +157,7 @@ class PiAgentClient:
         if api_key:
             self.api_key = api_key
         if base_url:
-            self.base_url = base_url
+            self.base_url = normalize_base_url(base_url)
         if model:
             self.model = model
 
@@ -154,7 +180,7 @@ def _build_prompt(messages: list[dict[str, Any]], response_format: dict | None) 
 
 
 def _run_async(coro):
-    """Run a coroutine from sync Streamlit/FastAPI code, even with an active loop."""
+    """Run a coroutine from synchronous desktop-sidecar code, even with an active loop."""
     try:
         asyncio.get_running_loop()
     except RuntimeError:

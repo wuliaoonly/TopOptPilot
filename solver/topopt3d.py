@@ -1,6 +1,6 @@
 """Deterministic 3-D SIMP optimizer with genuine Hex8 finite elements.
 
-The default F2 mesh is deliberately small enough for a local workstation, but
+The default development-regression mesh is deliberately small enough for a local workstation, but
 every objective and displacement is obtained from K u = f, not a surrogate.
 """
 

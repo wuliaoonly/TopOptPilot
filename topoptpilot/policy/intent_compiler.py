@@ -9,40 +9,33 @@ from __future__ import annotations
 import uuid
 from typing import Any
 
-from topoptpilot.fidelity import FidelityManager
+from topoptpilot.solver_profiles import DirectSolverPolicy
 from topoptpilot.policy.doe_templates import discriminating_experiments
 from topoptpilot.policy.safety_guard import evaluate_safety
-from topoptpilot.schemas import ExperimentProposal, Fidelity, IntentRequest, IntentType, SafetyStatus
-
-
-FIDELITY_LABELS = {
-    Fidelity.F0: "F0 — MATLAB 2D Coarse", Fidelity.F1: "F1 — MATLAB 2D Fine",
-    Fidelity.F2: "F2 — MATLAB 3D Coarse", Fidelity.F3: "F3 — MATLAB 3D Fine",
-}
+from topoptpilot.schemas import ExperimentProposal, IntentRequest, IntentType, SafetyStatus
 
 
 class IntentCompiler:
-    def __init__(self, fidelity_manager: FidelityManager | None = None):
-        self.fidelity_manager = fidelity_manager or FidelityManager()
+    def __init__(self, solver_policy: DirectSolverPolicy | None = None):
+        self.solver_policy = solver_policy or DirectSolverPolicy()
 
     def compile(self, research: dict[str, Any], experiments: list[dict[str, Any]],
                 request: IntentRequest | dict[str, Any]) -> list[ExperimentProposal]:
         intent = request if isinstance(request, IntentRequest) else IntentRequest.model_validate(request)
         source = self._source(experiments, intent.source_experiment)
         base = self._base_parameters(research, source)
-        current_fidelity = self._fidelity(source)
-        candidates: list[tuple[str, Fidelity, dict[str, Any], list[str]]] = []
+        candidates: list[tuple[str, dict[str, Any], list[str], bool]] = []
 
         if intent.intent == IntentType.ESTABLISH_BASELINE:
             params = {**base, "beta": 1.0, "rmin": 1.5, "penal": 3.0}
-            candidates.append(("Establish a reproducible F0 baseline", Fidelity.F0, params,
-                               ["baseline"]))
+            candidates.append(("Establish a reproducible direct MATLAB baseline", params,
+                               ["baseline"], False))
         elif intent.intent == IntentType.EXPLORE_PARAMETER:
             factor = intent.factor or "beta"
             levels = self._levels(factor, base)
             for value in levels:
                 params = {**base, factor: value}
-                candidates.append((f"Explore {factor}={value}", Fidelity.F0, params, [factor]))
+                candidates.append((f"Explore {factor}={value}", params, [factor], False))
         elif intent.intent == IntentType.REDUCE_GRAYNESS:
             current_beta = float(base.get("beta", 1.0))
             # Pick the smallest novel beta above the current value so the
@@ -50,7 +43,8 @@ class IntentCompiler:
             existing_betas = {
                 float((item.get("parameters") or {}).get("beta", 0))
                 for item in experiments
-                if str(item.get("fidelity", "")).split()[0] == current_fidelity.value
+                if int(item.get("dimension") or self.solver_policy.dimension(research)) ==
+                self.solver_policy.dimension(research)
             }
             new_beta = min(32.0, max(current_beta + 1.0, current_beta * 3))
             while new_beta in existing_betas and new_beta < 32.0:
@@ -58,42 +52,49 @@ class IntentCompiler:
             new_beta = min(32.0, max(2.0, new_beta))
             params = {**base, "beta": new_beta}
             candidates.append(("Reduce grayness with one bounded projection step",
-                               current_fidelity, params, ["beta"]))
+                               params, ["beta"], False))
         elif intent.intent == IntentType.RESTORE_CONNECTIVITY:
             beta_params = {**base, "beta": max(1.0, float(base.get("beta", 8)) / 2)}
             radius_params = {**base, "rmin": min(4.0, float(base.get("rmin", 1.5)) + .5)}
             candidates.append(("Test whether gentler projection restores connectivity",
-                               current_fidelity, beta_params, ["beta"]))
+                               beta_params, ["beta"], False))
             candidates.append(("Test whether a wider filter restores connectivity",
-                               current_fidelity, radius_params, ["rmin"]))
+                               radius_params, ["rmin"], False))
         elif intent.intent == IntentType.TEST_COMPETING_EXPLANATIONS:
             template = self._template(intent)
             for item in discriminating_experiments(template, base):
-                candidates.append((item["purpose"], current_fidelity, item["parameters"],
-                                   item["controlled_factors"]))
-        elif intent.intent in {IntentType.UPGRADE_FIDELITY, IntentType.VERIFY_CANDIDATE}:
-            target = Fidelity(self.fidelity_manager.promote_code(current_fidelity.value))
-            candidates.append((f"Verify transfer at {FIDELITY_LABELS[target]}", target, base,
-                               ["fidelity"]))
+                candidates.append((item["purpose"], item["parameters"],
+                                   item["controlled_factors"], False))
+        elif intent.intent == IntentType.VERIFY_CANDIDATE:
+            candidates.append(("Verify the candidate with a refined direct solver profile", base,
+                               ["solver_profile"], True))
 
         proposals = []
-        existing = {(str(item.get("fidelity", "F0")).split()[0],
+        existing = {(int(item.get("dimension") or self.solver_policy.dimension(research)),
+                     tuple((item.get("solver_profile") or {}).get("grid", [])),
                      self._parameter_key(item.get("parameters", {}))) for item in experiments}
-        for purpose, fidelity, parameters, factors in candidates:
+        dimension = self.solver_policy.dimension(research)
+        for purpose, parameters, factors, verify in candidates:
             parameters.update(research.get("locks", {}))
-            if (fidelity.value, self._parameter_key(parameters)) in existing:
+            profile = self.solver_policy.profile(research, verify=verify)
+            grid = list(profile["grid"])
+            parameters["grid3d" if dimension == 3 else "grid2d"] = grid
+            parameters["max_iter"] = int(profile["max_iterations"])
+            if (dimension, tuple(grid), self._parameter_key(parameters)) in existing:
                 continue
-            safety = evaluate_safety(parameters, FIDELITY_LABELS[fidelity])
-            status = (SafetyStatus.PASS if safety["safe"] and not safety["requires_approval"]
-                      else SafetyStatus.PENDING_HUMAN_APPROVAL if safety["safe"]
-                      else SafetyStatus.REJECTED)
+            safety = evaluate_safety(parameters)
+            status = SafetyStatus.PASS if safety["safe"] else SafetyStatus.REJECTED
             proposals.append(ExperimentProposal(
                 id=f"P-{uuid.uuid4().hex[:10].upper()}", research_id=research["id"],
-                intent=intent.intent, purpose=purpose, fidelity=fidelity,
-                backend=self.fidelity_manager.backend_for(fidelity.value), parameters=parameters,
-                estimated_cost=self.fidelity_manager.estimated_cost(fidelity.value),
+                intent=intent.intent, purpose=purpose, fidelity="DIRECT",
+                dimension=dimension, solver_profile=profile,
+                backend="MATLAB_MCP", parameters=parameters,
+                estimated_cost=float(profile["estimated_seconds"]),
+                estimated_seconds=float(profile["estimated_seconds"]),
+                estimated_memory_mb=float(profile["estimated_memory_mb"]),
+                execution_mode=str(research.get("mode", "COPILOT")),
                 risk=str(safety["risk"]), safety_status=status,
-                approval_required=bool(safety["requires_approval"]),
+                approval_required=research.get("mode") == "COPILOT",
                 source_experiment=source.get("id") if source else None,
                 controlled_factors=factors,
             ))
@@ -118,13 +119,6 @@ class IntentCompiler:
         constraints = research.get("constraints", {})
         return {"volfrac": float(constraints.get("volume_fraction", 0.4)), "rmin": 1.5,
                 "penal": 3.0, "beta": 1.0, "max_iter": 80}
-
-    @staticmethod
-    def _fidelity(source: dict | None) -> Fidelity:
-        if not source:
-            return Fidelity.F0
-        prefix = str(source.get("fidelity", "F0")).split()[0]
-        return Fidelity(prefix) if prefix in {item.value for item in Fidelity} else Fidelity.F0
 
     @staticmethod
     def _levels(factor: str, base: dict[str, Any]) -> list[float]:
