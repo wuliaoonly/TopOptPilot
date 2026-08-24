@@ -1,43 +1,64 @@
-"""Competition/test API. Business behavior is delegated to ResearchService."""
+"""Authenticated local desktop API delegated to ResearchService."""
 
 from __future__ import annotations
 
 import asyncio
+import json
 import os
-import secrets
-import threading
-import time
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 
 from topoptpilot.schemas import ExperimentCreate, ResearchCreate, ToolRequest
+from topoptpilot.api.ws_tickets import broker as ws_ticket_broker
 from topoptpilot.service import ResearchService
 from mcp.matlab_mcp import MatlabMcpError
 
 
 service = ResearchService()
-_ws_tickets: dict[str, tuple[str, float]] = {}
-_ws_ticket_lock = threading.Lock()
-
-
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     yield
     service.close()
 
 
-app = FastAPI(title="TopOptPilot Test API", version="5.0", lifespan=lifespan,
-              description="Programmatic interface to the same ResearchService used by Streamlit.")
+app = FastAPI(title="TopOptPilot Desktop API", version="6.2.2", lifespan=lifespan,
+              description="Local authenticated interface used by the Tauri desktop workspace.")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["tauri://localhost", "http://tauri.localhost", "https://tauri.localhost"],
     allow_origin_regex=r"^https?://(tauri\.localhost|localhost|127\.0\.0\.1)(:\d+)?$",
     allow_methods=["*"], allow_headers=["*"], allow_credentials=False,
 )
+
+
+def _api_error(code: str, message: str, *, source: str = "API",
+               retryable: bool = False, detail: dict | None = None) -> dict:
+    return {"code": code, "message": message, "source": source,
+            "retryable": retryable, "detail": detail or {}}
+
+
+@app.exception_handler(HTTPException)
+async def structured_http_error(_: Request, exc: HTTPException) -> JSONResponse:
+    if isinstance(exc.detail, dict) and {"code", "message"} <= set(exc.detail):
+        payload = exc.detail
+    else:
+        payload = _api_error(f"HTTP_{exc.status_code}", str(exc.detail))
+    return JSONResponse(payload, status_code=exc.status_code, headers=exc.headers)
+
+
+@app.exception_handler(RequestValidationError)
+async def structured_validation_error(_: Request, exc: RequestValidationError) -> JSONResponse:
+    errors = json.loads(json.dumps(exc.errors(), default=str))
+    return JSONResponse(
+        _api_error("REQUEST_VALIDATION_FAILED", "请求数据未通过校验",
+                   detail={"errors": errors}),
+        status_code=422,
+    )
 
 
 class CommandRequest(BaseModel):
@@ -53,10 +74,6 @@ class LocaleRequest(BaseModel):
     locale: str
 
 
-class AgentKeyRequest(BaseModel):
-    api_key: str = Field(min_length=1, max_length=2048)
-
-
 class SettingsPatchRequest(BaseModel):
     settings: dict
 
@@ -68,6 +85,10 @@ class CacheClearRequest(BaseModel):
 class GuideRequest(BaseModel):
     text: str = Field(min_length=1, max_length=4000)
     locale: str = "zh-CN"
+
+
+class AgentKeyRequest(BaseModel):
+    api_key: str = Field(min_length=1, max_length=2048)
 
 
 class GeometryPreviewRequest(BaseModel):
@@ -86,8 +107,10 @@ async def desktop_token_guard(request: Request, call_next):
     # must reach CORSMiddleware; the subsequent real request is still guarded.
     if expected and request.method != "OPTIONS" and request.url.path != "/api/health":
         if request.headers.get("x-topoptpilot-token") != expected:
-            from fastapi.responses import JSONResponse
-            return JSONResponse({"detail": "Invalid desktop session token"}, status_code=401)
+            return JSONResponse(
+                _api_error("INVALID_DESKTOP_TOKEN", "Invalid desktop session token"),
+                status_code=401,
+            )
     return await call_next(request)
 
 
@@ -123,22 +146,13 @@ def get_events(research_id: str, after: int = 0):
 @app.post("/api/research/{research_id}/stream-ticket")
 def create_stream_ticket(research_id: str):
     service._require_research(research_id)
-    ticket = secrets.token_urlsafe(32)
-    with _ws_ticket_lock:
-        now = time.monotonic()
-        for key, (_, expires) in list(_ws_tickets.items()):
-            if expires <= now:
-                _ws_tickets.pop(key, None)
-        _ws_tickets[ticket] = (research_id, now + 20.0)
-    return {"ticket": ticket, "expires_in": 20}
+    return ws_ticket_broker.issue("research", research_id)
 
 
 @app.websocket("/api/research/{research_id}/stream")
 async def stream_research(websocket: WebSocket, research_id: str):
     ticket = websocket.query_params.get("ticket", "")
-    with _ws_ticket_lock:
-        record = _ws_tickets.pop(ticket, None)
-    if not record or record[0] != research_id or record[1] <= time.monotonic():
+    if not ws_ticket_broker.consume(ticket, "research", research_id):
         await websocket.close(code=4401)
         return
     try:
@@ -191,6 +205,14 @@ def get_research(research_id: str):
 def compare_experiments(research_id: str, a: str, b: str):
     try:
         return service.tools.experiment_compare(research_id, a, b)
+    except (KeyError, ValueError) as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.get("/api/research/{research_id}/pareto")
+def research_pareto(research_id: str):
+    try:
+        return service.tools.research_get_pareto(research_id)
     except (KeyError, ValueError) as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -395,6 +417,7 @@ def delete_agent_credential():
         return service.delete_agent_key()
     except OSError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+
 
 @app.post("/api/settings/restart-pi")
 def restart_pi_settings():

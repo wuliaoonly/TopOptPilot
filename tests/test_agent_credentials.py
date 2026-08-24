@@ -7,7 +7,7 @@ from topoptpilot.security import credentials
 from topoptpilot.service.research_service import ResearchService
 
 
-def test_qwen_api_key_prefers_environment_then_credential_manager(monkeypatch) -> None:
+def test_qwen_api_key_prefers_explicitly_saved_credential(monkeypatch) -> None:
     monkeypatch.delenv("DASHSCOPE_API_KEY", raising=False)
     monkeypatch.setattr(credentials, "_read_credential", lambda: "credential-manager-secret")
 
@@ -15,8 +15,8 @@ def test_qwen_api_key_prefers_environment_then_credential_manager(monkeypatch) -
     assert credentials.qwen_api_key_source() == "credential_manager"
 
     monkeypatch.setenv("DASHSCOPE_API_KEY", "environment-secret")
-    assert credentials.get_qwen_api_key() == "environment-secret"
-    assert credentials.qwen_api_key_source() == "environment"
+    assert credentials.get_qwen_api_key() == "credential-manager-secret"
+    assert credentials.qwen_api_key_source() == "credential_manager"
 
 
 def test_agent_credential_routes_are_public_without_exposing_a_read_route() -> None:

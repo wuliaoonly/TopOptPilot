@@ -5,24 +5,15 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 import threading
 
-from topoptpilot.fidelity import FidelityManager
+from topoptpilot.solver_profiles import DirectSolverPolicy
 from topoptpilot.memory import ResearchMemory
 from topoptpilot.memory.retriever import retrieve_events
 from topoptpilot.policy.intent_compiler import IntentCompiler
 from topoptpilot.schemas import IntentRequest
+from topoptpilot.tools.contracts import ALLOWED_TOOLS
 
 if TYPE_CHECKING:
     from topoptpilot.service.research_service import ResearchService
-
-
-ALLOWED_TOOLS = {
-    "research_get_context", "research_query_history", "research_get_budget",
-    "policy_compile_intent", "experiment_preview", "experiment_submit",
-    "experiment_status", "experiment_result", "experiment_compare",
-    "research_get_pareto", "failure_get_evidence",
-    "knowledge_search", "knowledge_get", "solver_get_capabilities",
-    "subagent_dispatch", "subagent_status",
-}
 
 
 class ResearchTools:
@@ -79,7 +70,7 @@ class ResearchTools:
         return [{"event": event} for event in events] + [{"experiment": _compact(item)} for item in experiments]
 
     def research_get_budget(self, research_id: str) -> dict:
-        return FidelityManager.budget(self.service._require_research(research_id),
+        return DirectSolverPolicy.budget(self.service._require_research(research_id),
                                       self.service.store.list_experiments(research_id))
 
     def policy_compile_intent(self, research_id: str, **arguments) -> list[dict]:
@@ -97,17 +88,19 @@ class ResearchTools:
                 "decision_source": source, "intent_source": source,
                 "policy_version": "v6-intent-compiler-1",
                 "model": self.service.pi_runtime.model if source == "PI_AGENT" and self.service.pi_runtime else None,
-                "provider": "dashscope" if source == "PI_AGENT" else None,
+                "provider": "openai-compatible" if source == "PI_AGENT" else None,
                 "session_id": session.get("session_id"), "evidence_ids": evidence_ids}))
         return saved
 
     def experiment_preview(self, research_id: str, proposal_id: str) -> dict:
         proposal = self._proposal(research_id, proposal_id)
         budget = self.research_get_budget(research_id)
-        code = proposal["fidelity"]
-        return {**proposal, "budget_remaining": budget["remaining"].get(code, 0),
+        time_ok = (budget["time_remaining"] is None or
+                   float(proposal.get("estimated_seconds") or 0) <= budget["time_remaining"])
+        return {**proposal, "budget_remaining": budget["remaining"]["total"],
+                "time_remaining": budget["time_remaining"],
                 "can_submit": proposal["safety_status"] != "REJECTED"
-                and budget["remaining"].get(code, 0) > 0}
+                and budget["remaining"]["total"] > 0 and time_ok}
 
     def experiment_submit(self, research_id: str, proposal_id: str) -> dict:
         return self.service.submit_proposal(research_id, proposal_id)
@@ -125,7 +118,8 @@ class ResearchTools:
             return {"status": item["status"], "compliance": None, "gray_ratio": None,
                     "connected_components": None, "volume_fraction": None,
                     "volume_error": None, "iterations": item.get("current_iteration", 0),
-                    "fidelity": item["fidelity"], "solver": None}
+                    "dimension": item.get("dimension"), "solver_profile": item.get("solver_profile"),
+                    "solver": None}
         result = item["result"]
         objective, constraints, quality, solver = (result.get(name, {}) for name in
                                                     ("objective", "constraints", "quality", "solver"))
@@ -136,7 +130,8 @@ class ResearchTools:
                 "gray_ratio": quality.get("gray_ratio"),
                 "connected_components": quality.get("connected_components"),
                 "volume_fraction": actual, "volume_error": volume_error,
-                "iterations": solver.get("iterations"), "fidelity": item["fidelity"],
+                "iterations": solver.get("iterations"), "dimension": item.get("dimension"),
+                "solver_profile": item.get("solver_profile"),
                 "solver": {key: value for key, value in solver.items() if key != "raw_output"}}
 
     def experiment_compare(self, research_id: str, a: str, b: str) -> dict:

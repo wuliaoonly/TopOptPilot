@@ -1,11 +1,11 @@
-"""Public data contracts shared by Streamlit, API and the research core."""
+"""Public data contracts shared by the desktop API and research core."""
 
 from __future__ import annotations
 
 from enum import Enum
-from typing import Any, Literal
+from typing import Any
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, field_validator
 
 
 class ExperimentStatus(str, Enum):
@@ -40,11 +40,8 @@ class EventKind(str, Enum):
 class AgentRole(str, Enum):
     RESEARCH_LEAD = "RESEARCH_LEAD"
     GUIDE = "GUIDE"
-    HYPOTHESIS = "HYPOTHESIS"
-    EXPERIMENT_PLANNER = "EXPERIMENT_PLANNER"
-    EXPERIMENT_EXECUTOR = "EXPERIMENT_EXECUTOR"
+    SCIENTIST = "SCIENTIST"
     INDEPENDENT_REVIEWER = "INDEPENDENT_REVIEWER"
-    REPORT_WRITER = "REPORT_WRITER"
 
 
 class SubagentStatus(str, Enum):
@@ -73,20 +70,12 @@ class SolverVariant(str, Enum):
     GPU = "gpu"
 
 
-class Fidelity(str, Enum):
-    F0 = "F0"
-    F1 = "F1"
-    F2 = "F2"
-    F3 = "F3"
-
-
 class IntentType(str, Enum):
     ESTABLISH_BASELINE = "ESTABLISH_BASELINE"
     EXPLORE_PARAMETER = "EXPLORE_PARAMETER"
     REDUCE_GRAYNESS = "REDUCE_GRAYNESS"
     RESTORE_CONNECTIVITY = "RESTORE_CONNECTIVITY"
     TEST_COMPETING_EXPLANATIONS = "TEST_COMPETING_EXPLANATIONS"
-    UPGRADE_FIDELITY = "UPGRADE_FIDELITY"
     VERIFY_CANDIDATE = "VERIFY_CANDIDATE"
 
 
@@ -153,18 +142,15 @@ class ArtifactLineage(BaseModel):
 
 class BudgetSpec(BaseModel):
     total: int = Field(default=12, ge=1)
-    f0: int = Field(default=6, ge=0)
-    f1: int = Field(default=4, ge=0)
-    f2: int = Field(default=2, ge=0)
-    f3: int = Field(default=1, ge=0)
+    time_seconds: int | None = Field(default=None, ge=30, le=604800)
 
 
 class AgentSettings(BaseModel):
     """Non-sensitive defaults for newly created Pi sessions."""
 
-    model: str = Field(default="qwen3.7-plus", min_length=1, max_length=120)
+    model: str = Field(default="deepseek-v4-flash", min_length=1, max_length=120)
     base_url: str = Field(
-        default="https://dashscope.aliyuncs.com/compatible-mode/v1",
+        default="https://api.ai-pixel.online/v1",
         min_length=8,
         max_length=500,
     )
@@ -190,7 +176,7 @@ class NewResearchSettings(BaseModel):
     material: dict[str, float] = Field(default_factory=lambda: {"E": 1.0, "nu": 0.3})
     experiment: dict[str, Any] = Field(
         default_factory=lambda: {
-            "mesh_level": "coarse",
+            "accuracy": "standard",
             "parameters": {"volfrac": 0.4, "rmin": 1.5, "penal": 3.0, "beta": 1.0, "max_iter": 80},
         }
     )
@@ -203,6 +189,7 @@ class DataSettings(BaseModel):
     # None keeps the default <data_dir>/cache directory.
     cache_dir: str | None = Field(default=None, max_length=500)
 
+
 class CustomThemeSettings(BaseModel):
     accent: str = Field(default="#2e73ca", pattern=r"^#[0-9a-fA-F]{6}$")
     background: str = Field(default="#f4f7fb", pattern=r"^#[0-9a-fA-F]{6}$")
@@ -214,7 +201,7 @@ class AppSettings(BaseModel):
     """Persisted, non-secret application preferences.
 
     API keys deliberately do not appear in this model. They are read only from the
-    process environment at the moment a connection is tested or a session starts.
+    process environment or Windows Credential Manager at connection/session start.
     """
 
     locale: str = Field(default="zh-CN", pattern="^(zh-CN|en-US)$")
@@ -240,7 +227,7 @@ class ResearchCreate(BaseModel):
     })
     budget_total: int = Field(default=12, ge=1, le=10000)
     budgets: BudgetSpec | None = None
-    mode: str = "COPILOT"
+    mode: str = Field(default="COPILOT", pattern="^(COPILOT|AUTONOMOUS)$")
     geometry: dict[str, Any] = Field(default_factory=lambda: {"type": "MBB", "dimensions": [3.0, 1.0]})
     material: dict[str, Any] = Field(default_factory=lambda: {"E": 1.0, "nu": 0.3})
     loads: list[dict[str, Any]] = Field(default_factory=lambda: [{"type": "vertical", "magnitude": 1.0}])
@@ -265,9 +252,15 @@ class ResearchCreate(BaseModel):
 
 class ExperimentCreate(BaseModel):
     purpose: str = "Establish a topology optimization baseline."
-    fidelity: str = "F0 - 2D Coarse"
-    mesh_level: str = "coarse"
-    backend: Literal["python", "python3d", "matlab"] = "python"
+    fidelity: str = "DIRECT"
+    legacy_fidelity: str | None = None
+    dimension: int = Field(default=2, ge=2, le=3)
+    solver_profile: dict[str, Any] = Field(default_factory=dict)
+    mesh_level: str = "direct"
+    backend: str = "MATLAB_MCP"
+    estimated_seconds: float = Field(default=0, ge=0)
+    estimated_memory_mb: float = Field(default=0, ge=0)
+    execution_mode: str = Field(default="COPILOT", pattern="^(COPILOT|AUTONOMOUS)$")
     parameters: dict[str, Any] = Field(default_factory=lambda: {
         "volfrac": 0.40,
         "rmin": 1.5,
@@ -293,15 +286,12 @@ class ExperimentCreate(BaseModel):
     review_verdict: str | None = None
     human_decision: str | None = None
 
-    @model_validator(mode="after")
-    def validate_fidelity_backend(self) -> "ExperimentCreate":
-        code = str(self.fidelity).strip().split(maxsplit=1)[0]
-        expected = {"F0": "python", "F1": "python", "F2": "python3d", "F3": "matlab"}.get(code)
-        if expected is None:
-            raise ValueError("fidelity must start with F0, F1, F2, or F3")
-        if self.backend != expected:
-            raise ValueError(f"{code} requires backend={expected}; received backend={self.backend}")
-        return self
+    @field_validator("backend")
+    @classmethod
+    def validate_backend(cls, value: str) -> str:
+        if value != "MATLAB_MCP":
+            raise ValueError("backend must be MATLAB_MCP")
+        return value
 
 
 class WorkspaceCommandResult(BaseModel):
@@ -325,10 +315,15 @@ class ExperimentProposal(BaseModel):
     research_id: str
     intent: IntentType
     purpose: str
-    fidelity: Fidelity
+    fidelity: str = "DIRECT"
+    dimension: int = Field(ge=2, le=3)
+    solver_profile: dict[str, Any]
     backend: str
     parameters: dict[str, Any]
     estimated_cost: float
+    estimated_seconds: float
+    estimated_memory_mb: float
+    execution_mode: str
     risk: str
     safety_status: SafetyStatus
     approval_required: bool = False
@@ -361,10 +356,9 @@ class KnowledgeDocument(BaseModel):
 
 
 class SolverCapability(BaseModel):
-    fidelity: Fidelity
     dimension: int
-    mesh_level: str
-    backend: str = "matlab"
+    solver_profile: dict[str, Any] = Field(default_factory=dict)
+    backend: str = "MATLAB_MCP"
     variants: list[str] = Field(default_factory=lambda: ["reference_cpu"])
     selected_variant: str = "reference_cpu"
     acceleration_mode: str = "cpu"
