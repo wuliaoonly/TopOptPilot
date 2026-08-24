@@ -272,15 +272,52 @@ class PiProcess:
                                     payload={"proposal_id": task["proposal_id"], "verdict": verdict},
                                     source="HUMAN_GATE", event_type="HUMAN_DECISION")
                     if (not failed and self.role == "INDEPENDENT_REVIEWER"
-                            and not task.get("proposal_id")
-                            and "termination and conclusion" in str(task.get("objective", "")).lower()):
-                        paths = self.bridge.service.report_generator.generate(
-                            self.bridge.service.get_research(self.research_id))
+                            and _is_final_review_task(task)):
+                        verdict = _review_verdict(result_text)
                         self.bridge.service.store.append_event(
-                            self.research_id, "SYSTEM", "FINAL REPORT READY",
-                            str(paths["markdown"]),
-                            payload={key: str(value) for key, value in paths.items()},
-                            source="DETERMINISTIC_REPORT", event_type="REPORT_READY")
+                            self.research_id, "REVIEW", "FINAL REVIEW VERDICT", verdict,
+                            payload={"task_id": self.task_id, "verdict": verdict},
+                            source=f"SUBAGENT:{self.role}", event_type="REVIEW_VERDICT")
+                        if verdict == "APPROVE":
+                            paths = self.bridge.service.report_generator.generate(
+                                self.bridge.service.get_research(self.research_id))
+                            self.bridge.service.store.append_event(
+                                self.research_id, "SYSTEM", "FINAL REPORT READY",
+                                str(paths["markdown"]),
+                                payload={key: str(value) for key, value in paths.items()},
+                                source="DETERMINISTIC_REPORT", event_type="REPORT_READY")
+                        else:
+                            budget = self.bridge.service.tools.research_get_budget(self.research_id)
+                            if budget["remaining"]["total"] > 0:
+                                self.bridge.service.store.update_research(
+                                    self.research_id, status="READY", termination_reason=None)
+                                self.bridge.service.store.append_event(
+                                    self.research_id, "REVIEW", "FINAL REVIEW CORRECTION APPLIED",
+                                    "Termination was withdrawn; the Research Lead must address the review.",
+                                    payload={"task_id": self.task_id, "verdict": verdict,
+                                             "remaining_budget": budget["remaining"]["total"]},
+                                    source=f"SUBAGENT:{self.role}", event_type="REVIEW_VERDICT")
+                                threading.Thread(
+                                    target=self.bridge.send,
+                                    args=(
+                                        self.research_id,
+                                        f"Independent Reviewer returned {verdict} on the proposed termination. "
+                                        "The termination has been withdrawn. Read authoritative context and "
+                                        "the reviewer result, then use the remaining budget for one controlled "
+                                        "experiment that addresses the review. Use Policy; do not write numeric "
+                                        "solver parameters directly.",
+                                        "hypothesis-evaluation",
+                                    ),
+                                    daemon=True,
+                                ).start()
+                            else:
+                                self.bridge.service.store.update_research(
+                                    self.research_id, status="PAUSED")
+                                self.bridge.service.store.append_event(
+                                    self.research_id, "HUMAN", "FINAL REVIEW NEEDS HUMAN DIRECTION",
+                                    "The final conclusion was not approved and no experiment budget remains.",
+                                    payload={"task_id": self.task_id, "verdict": verdict},
+                                    source="HUMAN_GATE", event_type="HUMAN_DECISION")
                     self.bridge.service.store.append_event(
                         self.research_id, "SUBAGENT", f"{self.role} {status}",
                         result_text or error or f"Subagent task {self.task_id} ended.",
@@ -426,3 +463,8 @@ def _review_verdict(text: str) -> str:
     """Read the reviewer's leading verdict without being confused by its rationale."""
     match = re.search(r"\b(APPROVE|REVISE|REJECT)\b", text[:160].upper())
     return match.group(1) if match else "REVISE"
+
+
+def _is_final_review_task(task: dict[str, Any]) -> bool:
+    return (not task.get("proposal_id")
+            and str(task.get("objective", "")).startswith("FINAL_REVIEW:"))

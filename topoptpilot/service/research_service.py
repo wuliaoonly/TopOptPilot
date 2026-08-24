@@ -586,6 +586,11 @@ class ResearchService:
             if (q.get("gray_ratio", 1) <= research["constraints"].get("gray_max", 0.05)
                     and (not research["constraints"].get("connected", True)
                          or q.get("connected_components") == 1)):
+                # Feasibility is necessary but does not by itself validate a stated
+                # experimental hypothesis. Keep one controlled follow-up available
+                # whenever the contract contains a hypothesis and budget remains.
+                if research.get("hypothesis") and len(successful) < 2:
+                    return None
                 return "GOAL_ACHIEVED"
         if len(successful) >= 4:
             values = [item["result"]["objective"]["compliance"] for item in successful[-4:]]
@@ -882,9 +887,7 @@ class ResearchService:
                         self.store.append_event(research["id"], EventKind.SYSTEM.value,
                                                 "FINAL REPORT FAILED", str(report_error))
                     if self.pi_runtime:
-                        self.pi_runtime.subagents.dispatch(
-                            research["id"], "INDEPENDENT_REVIEWER",
-                            "Audit whether the deterministic evidence supports the termination and conclusion.")
+                        self._dispatch_final_review(research["id"], termination)
                 elif current["mode"] == "AUTONOMOUS":
                     completed_items = [item for item in self.store.list_experiments(research["id"])
                                        if item.get("completed_at")]
@@ -1178,9 +1181,33 @@ class ResearchService:
         return experiment
 
     def _command_report(self, research_id: str) -> WorkspaceCommandResult:
+        research = self._require_research(research_id)
+        termination = research.get("termination_reason")
+        if termination and self.pi_runtime and self.pi_runtime.health()["available"]:
+            task = self._dispatch_final_review(research_id, termination)
+            return WorkspaceCommandResult(
+                ok=True,
+                message="Final report is waiting for an isolated Independent Reviewer verdict.",
+                action="review_pending",
+                data={"task_id": task["id"]},
+            )
         path = self.generate_report(research_id)
         return WorkspaceCommandResult(ok=True, message=f"Report generated: {path}", action="report",
                                       data={"path": str(path)})
+
+    def _dispatch_final_review(self, research_id: str, termination: str) -> dict[str, Any]:
+        marker = "FINAL_REVIEW:"
+        for task in reversed(self.store.list_subagent_tasks(research_id)):
+            if (task.get("status") in {"QUEUED", "RUNNING"}
+                    and str(task.get("objective", "")).startswith(marker)):
+                return task
+        return self.pi_runtime.subagents.dispatch(
+            research_id, "INDEPENDENT_REVIEWER",
+            f"{marker} Audit whether deterministic evidence supports the recorded research "
+            f"termination reason {termination} and the final conclusion. Your first token must be "
+            "APPROVE, REVISE, or REJECT. APPROVE only if termination itself is justified. "
+            "If a comparison is uncontrolled, prohibit causal attribution explicitly; use REVISE "
+            "when the fact draft overclaims it. Otherwise use REJECT and state the correction.")
 
     def _command_export(self, research_id: str) -> WorkspaceCommandResult:
         report = self.generate_report(research_id)
