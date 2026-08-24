@@ -21,6 +21,21 @@ export async function initializeBackend(): Promise<BackendInfo> {
 }
 
 function base(): string { if (!backend) throw new Error("Backend not initialized"); return `http://127.0.0.1:${backend.port}`; }
+function errorMessage(payload: unknown, fallback: string): string {
+  if (payload && typeof payload === "object") {
+    const envelope = payload as { message?: unknown; code?: unknown };
+    if (typeof envelope.message === "string") return envelope.message;
+    if (typeof envelope.code === "string") return envelope.code;
+  }
+  const detail = (payload as { detail?: unknown } | null)?.detail;
+  if (typeof detail === "string") return detail;
+  if (detail && typeof detail === "object") {
+    const value = detail as { message?: unknown; code?: unknown };
+    if (typeof value.message === "string") return value.message;
+    if (typeof value.code === "string") return value.code;
+  }
+  return fallback;
+}
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   await initializeBackend();
   let lastError: unknown;
@@ -30,7 +45,7 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
     try {
       const response = await fetch(base() + path, { ...init, headers: { "Content-Type": "application/json",
         "X-TopOptPilot-Token": backend!.token, ...(init.headers || {}) } });
-      if (!response.ok) throw new Error((await response.json().catch(() => ({}))).detail || response.statusText);
+      if (!response.ok) throw new Error(errorMessage(await response.json().catch(() => ({})), response.statusText));
       return response.json();
     } catch (reason) {
       lastError = reason;
@@ -44,7 +59,7 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
 async function download(path:string,filename:string):Promise<void>{
   await initializeBackend();
   const response=await fetch(base()+path,{headers:{"X-TopOptPilot-Token":backend!.token}});
-  if(!response.ok)throw new Error((await response.json().catch(()=>({}))).detail||response.statusText);
+  if(!response.ok)throw new Error(errorMessage(await response.json().catch(()=>({})),response.statusText));
   const url=URL.createObjectURL(await response.blob()),anchor=document.createElement("a");
   anchor.href=url;anchor.download=filename;document.body.appendChild(anchor);anchor.click();anchor.remove();
   setTimeout(()=>URL.revokeObjectURL(url),1000);
@@ -62,14 +77,14 @@ export const api = {
   patchPreview: (root: string, proposal: import("./types").PatchProposal) => invoke<import("./types").PatchPreviewResult>("patch_preview", { root, proposal }),
   patchApply: (root: string, proposal: import("./types").PatchProposal, approvalToken: string) => invoke<import("./types").ProjectFile[]>("patch_apply", { root, proposal, approvalToken }),
   engineeringPatch: (data: object) => request<import("./types").PatchProposal>("/api/engineering/assistant/patch", { method: "POST", body: JSON.stringify(data) }),
+  engineeringGenerate: (instruction: string) => request<{generatedEntrypoint:string;generatedFiles:Record<string,string>}>("/api/engineering/assistant/generate", { method: "POST", body: JSON.stringify({ instruction }) }),
   health: () => request<SystemHealth>("/api/health"),
   listResearch: () => request<Research[]>("/api/research"),
   getResearch: (id: string) => request<Research>(`/api/research/${id}`),
-  researchArtifacts: (id: string) => request<{researchId:string; experiments:Array<{experimentId:string; status:string; fidelity:string; backend:string; provenance:Record<string,string>; files:Array<{relativePath:string; sha256:string; mediaType:string; sizeBytes:number}>; metrics:Record<string,number|null>}>}>(`/api/research/${id}/artifacts`),
+  researchArtifacts: (id: string) => request<{researchId:string; experiments:Array<{experimentId:string; status:string; dimension:number; solverProfile:Record<string,unknown>; legacyFidelity?:string; backend:string; provenance:Record<string,string>; files:Array<{relativePath:string; sha256:string; mediaType:string; sizeBytes:number}>; metrics:Record<string,number|null>}>}>(`/api/research/${id}/artifacts`),
   researchPareto: (id: string) => request<Array<Record<string,unknown>>>(`/api/research/${id}/pareto`),
   researchCompare: (id: string, a: string, b: string) => request<Record<string,unknown>>(`/api/research/${id}/compare?a=${encodeURIComponent(a)}&b=${encodeURIComponent(b)}`),
-  researchFromEngineeringRun: (runId: string, data: object) => request<Research>(`/api/research/from-engineering-run/${encodeURIComponent(runId)}`, { method: "POST", body: JSON.stringify(data) }),
-  compare: (id:string,a:string,b:string) => request<Record<string,unknown>>(`/api/research/${id}/compare?a=${encodeURIComponent(a)}&b=${encodeURIComponent(b)}`),
+  researchFromEngineeringRun: (runId: string, data: object) => request<{researchId:string; snapshot:Record<string,unknown>; research:Research}>(`/api/research/from-engineering-run/${encodeURIComponent(runId)}`, { method: "POST", body: JSON.stringify(data) }),
   createResearch: (data: object) => request<Research>("/api/research", { method: "POST", body: JSON.stringify(data) }),
   previewGuide: (text:string,locale:Locale) => request<Record<string,any>>("/api/guide", {method:"POST",body:JSON.stringify({text,locale})}),
   guide: (id:string,text:string) => request<Record<string,any>>(`/api/research/${id}/guide`, {method:"POST",body:JSON.stringify({text})}),
@@ -113,9 +128,10 @@ export const api = {
   webviewCreate: (url: string) => invoke<string>("webview_create", { url }),
   webviewNavigate: (url: string) => invoke<void>("webview_navigate", { url }),
   webviewClose: () => invoke<void>("webview_close"),
-  engineeringStream: (id: string, onEvent: (event: Record<string, unknown>) => void): WebSocket => {
+  engineeringStream: async (id: string, onEvent: (event: Record<string, unknown>) => void): Promise<WebSocket> => {
     if (!backend) throw new Error("Backend not initialized");
-    const socket = new WebSocket(`ws://127.0.0.1:${backend.port}/api/engineering/runs/${id}/stream?token=${encodeURIComponent(backend.token)}`);
+    const value = await request<{ticket:string}>(`/api/engineering/runs/${id}/stream-ticket`, {method:"POST"});
+    const socket = new WebSocket(`ws://127.0.0.1:${backend.port}/api/engineering/runs/${id}/stream?ticket=${encodeURIComponent(value.ticket)}`);
     socket.onmessage = message => { try { onEvent(JSON.parse(message.data)); } catch { /* ignore malformed event */ } };
     return socket;
   },
@@ -126,4 +142,45 @@ export const api = {
     const value = await request<{ticket:string}>(`/api/research/${id}/stream-ticket`, {method:"POST"});
     return new WebSocket(`ws://127.0.0.1:${backend.port}/api/research/${id}/stream?ticket=${encodeURIComponent(value.ticket)}`);
   }
+};
+
+// Functional ownership exports. `api` remains the one-release compatibility
+// aggregate while workspaces migrate to these narrower surfaces.
+export const systemApi = {
+  health: api.health, settings: api.settings, saveSettings: api.saveSettings,
+  setAgentKey: api.setAgentKey, deleteAgentKey: api.deleteAgentKey,
+  testAgent: api.testAgent, restartPi: api.restartPi,
+  matlabHealth: api.matlabHealth, restartMatlab: api.restartMatlab,
+  diagnostics: api.diagnostics, clearCache: api.clearCache,
+};
+
+export const projectApi = {
+  pickFolder: api.projectPickFolder, open: api.projectOpen, list: api.projectList,
+  read: api.projectRead, save: api.projectSave, create: api.projectCreate,
+  rename: api.projectRename, search: api.projectSearch,
+  patchPreview: api.patchPreview, patchApply: api.patchApply,
+  webviewCreate: api.webviewCreate, webviewNavigate: api.webviewNavigate,
+  webviewClose: api.webviewClose,
+};
+
+export const quickApi = {
+  health: api.engineeringHealth, installations: api.engineeringInstallations,
+  runtimeInstallations: api.engineeringRuntimeInstallations,
+  probe: api.engineeringProbe, preference: api.engineeringPreference,
+  runtimeProbe: api.engineeringRuntimeProbe, bundledRuntime: api.engineeringBundledRuntime,
+  run: api.engineeringRun, getRun: api.engineeringRunGet, cancel: api.engineeringCancel,
+  events: api.engineeringEvents, report: api.engineeringReport, stream: api.engineeringStream,
+  patch: api.engineeringPatch, generate: api.engineeringGenerate,
+  terminalStart: api.terminalStart, terminalCommand: api.terminalCommand,
+  terminalPoll: api.terminalPoll, terminalStop: api.terminalStop,
+};
+
+export const deepApi = {
+  list: api.listResearch, get: api.getResearch, create: api.createResearch,
+  promote: api.researchFromEngineeringRun, artifacts: api.researchArtifacts,
+  compare: api.researchCompare, pareto: api.researchPareto,
+  autonomous: api.autonomous, command: api.command, guide: api.guide,
+  approve: api.approve, reject: api.reject, editDecision: api.editDecision,
+  why: api.why, agentTasks: api.agentTasks, setLocale: api.setLocale,
+  stream: api.stream, downloadReport: api.downloadReport,
 };

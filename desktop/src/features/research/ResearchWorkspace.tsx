@@ -7,7 +7,7 @@ import { ConvergenceChart, ScalarMap } from "../engineering/ResultViewer";
 import { normalizeResearchField, normalizeResearchHistory } from "./research-result";
 import ResizableWorkspaceLayout from "../../components/ResizableWorkspaceLayout";
 
-type ArtifactIndex = { experiments: Array<{ experimentId: string; status: string; fidelity: string; backend: string; provenance: Record<string, string>; files: Array<{ relativePath: string; sizeBytes: number; sha256: string }>; metrics: Record<string, number | null> }> };
+type ArtifactIndex = { experiments: Array<{ experimentId: string; status: string; dimension: number; solverProfile: Record<string, unknown>; legacyFidelity?: string; backend: string; provenance: Record<string, string>; files: Array<{ relativePath: string; sizeBytes: number; sha256: string }>; metrics: Record<string, number | null> }> };
 type Props = {
   researches: Research[];
   selected: Research | null;

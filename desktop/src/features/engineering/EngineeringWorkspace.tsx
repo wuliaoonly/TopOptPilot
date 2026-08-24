@@ -358,7 +358,7 @@ export default function EngineeringWorkspace({
       payload.task.params = { max_iter: maxIter, volfrac };
       const created = await api.engineeringRun(payload);
       setRun(created);
-      const socket = api.engineeringStream(created.runId, event => setEvents(items => [...items, event].slice(-80)));
+      const socket = await api.engineeringStream(created.runId, event => setEvents(items => [...items, event].slice(-80)));
       try {
         for (;;) {
           await new Promise(resolve => window.setTimeout(resolve, 250));
