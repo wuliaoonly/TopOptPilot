@@ -27,7 +27,11 @@ def test_research_baseline_does_not_submit_an_experiment(monkeypatch, tmp_path) 
         time.sleep(0.02)
     response = client.post(f"/api/research/from-engineering-run/{created['runId']}", json={"name": "工程基线研究", "budgetTotal": 8})
     assert response.status_code == 201
-    research = response.json()
-    assert research["constraints"]["engineering_baseline"]["runId"] == created["runId"]
+    promoted = response.json()
+    research = promoted["research"]
+    baseline = research["constraints"]["engineering_baseline"]
+    assert baseline["originRunId"] == created["runId"]
+    assert baseline["snapshotId"] == promoted["snapshot"]["snapshotId"]
+    assert baseline["sourceDigest"] == promoted["snapshot"]["sourceDigest"]
     assert research["budget_total"] == 8
     assert research["experiments"] == []
