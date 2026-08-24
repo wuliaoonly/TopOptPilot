@@ -1247,13 +1247,26 @@ class ResearchService:
     def _command_report(self, research_id: str) -> WorkspaceCommandResult:
         research = self._require_research(research_id)
         termination = research.get("termination_reason")
-        if termination and self.pi_runtime and self.pi_runtime.health()["available"]:
-            task = self._dispatch_final_review(research_id, termination)
+        if termination:
+            if self.pi_runtime and self.pi_runtime.health()["available"]:
+                task = self._dispatch_final_review(research_id, termination)
+                return WorkspaceCommandResult(
+                    ok=True,
+                    message="Final report is waiting for an isolated Independent Reviewer verdict.",
+                    action="review_pending",
+                    data={"task_id": task["id"]},
+                )
+            self.store.update_research(research_id, status="PAUSED")
+            self.store.append_event(
+                research_id, EventKind.SYSTEM.value, "FINAL REVIEW UNAVAILABLE",
+                "Final report generation is blocked until the Independent Reviewer runtime is available.",
+                source="AGENT", event_type="REVIEW_PENDING",
+            )
             return WorkspaceCommandResult(
-                ok=True,
-                message="Final report is waiting for an isolated Independent Reviewer verdict.",
+                ok=False,
+                message="Independent Reviewer is unavailable; final report generation remains blocked.",
                 action="review_pending",
-                data={"task_id": task["id"]},
+                data={"reason": "reviewer_unavailable"},
             )
         path = self.generate_report(research_id)
         return WorkspaceCommandResult(ok=True, message=f"Report generated: {path}", action="report",

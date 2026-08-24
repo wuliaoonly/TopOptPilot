@@ -10,6 +10,7 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from pathlib import PurePosixPath
 import re
@@ -28,7 +29,7 @@ from idesktop_v2.engineering.runtime_profiles import RuntimeProfileError, runtim
 
 def _data_root() -> Path:
     root = os.environ.get("IDESKTOP_V2_DATA_DIR") or os.environ.get("TOPPILOT_DATA_DIR")
-    local = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData/Local")) / "iDeskTopV2"
+    local = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData/Local")) / "TopOptPilot"
     return (Path(root).expanduser().resolve() if root else local) / "runs"
 
 
@@ -193,8 +194,20 @@ class RunManager:
             return list(record.events)
 
     def _emit(self, record: _Run, event: dict[str, Any]) -> None:
+        payload = dict(event)
+        envelope = {
+            "eventId": f"QEV-{uuid.uuid4().hex[:12].upper()}",
+            "source": "ENGINEERING",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "ownerType": "engineering_run",
+            "ownerId": record.run_id,
+            "runId": record.run_id,
+            "experimentId": None,
+            "payload": payload,
+            **event,
+        }
         with record.lock:
-            record.events.append({"timestamp": time.time(), **event})
+            record.events.append(envelope)
 
     @staticmethod
     def _ref(run_dir: Path, path: Path, media_type: str | None = None) -> ArtifactRef:

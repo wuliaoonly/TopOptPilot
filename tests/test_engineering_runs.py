@@ -95,7 +95,12 @@ def test_run_stream_replays_progress_events(monkeypatch, tmp_path) -> None:
     # The non-WebSocket event endpoint is intentionally a deterministic replay helper for CLI clients.
     events = client.get(f"/api/engineering/runs/{run_id}/events")
     assert events.status_code == 200
-    assert any(item["type"] == "progress" for item in events.json()["events"])
+    replay = events.json()["events"]
+    assert any(item["type"] == "progress" for item in replay)
+    assert all({"eventId", "source", "timestamp", "ownerType", "ownerId", "payload"} <= set(item)
+               for item in replay)
+    assert all(item["ownerType"] == "engineering_run" and item["ownerId"] == run_id
+               for item in replay)
 
 
 def test_local_matlab_lane_fails_with_infrastructure_evidence_when_unavailable(monkeypatch, tmp_path) -> None:

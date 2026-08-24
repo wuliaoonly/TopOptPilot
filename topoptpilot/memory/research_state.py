@@ -728,4 +728,9 @@ def _event_envelope(value: dict | None) -> dict | None:
     value["type"] = value.get("event_type") or _event_type(value["kind"], value["title"])
     value["source"] = value.get("source") or _event_source(value["kind"], value["title"])
     value["timestamp"] = value.get("created_at")
+    value["eventId"] = value["event_id"]
+    value["ownerType"] = "experiment" if value.get("experiment_id") else "research"
+    value["ownerId"] = value.get("experiment_id") or value.get("research_id")
+    value["runId"] = (value.get("payload") or {}).get("runId")
+    value["experimentId"] = value.get("experiment_id")
     return value
