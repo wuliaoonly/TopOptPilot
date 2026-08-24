@@ -50,7 +50,7 @@ export default function (pi: ExtensionAPI) {
 
   register(pi, "research_get_context", "Read compact authoritative L3 research context before planning.", Type.Object({}));
   register(pi, "research_query_history", "Retrieve relevant historical experiments and evidence.", Type.Object({ query: Type.String(), limit: Type.Optional(Type.Number()) }));
-  register(pi, "research_get_budget", "Read remaining total and per-fidelity budgets.", Type.Object({}));
+  register(pi, "research_get_budget", "Read remaining experiment-count and compute-time budgets.", Type.Object({}));
   register(pi, "policy_compile_intent", "Compile scientific intent into safe controlled experiment proposals.", Type.Object({
     intent: Type.String(), preserve: Type.Optional(Type.Array(Type.String())),
     explanations: Type.Optional(Type.Array(Type.String())), factors: Type.Optional(Type.Array(Type.String())),
@@ -67,7 +67,7 @@ export default function (pi: ExtensionAPI) {
     query: Type.String(), limit: Type.Optional(Type.Number()), category: Type.Optional(Type.String()),
   }));
   register(pi, "knowledge_get", "Read one cited offline knowledge document.", Type.Object({ document_id: Type.String() }));
-  register(pi, "solver_get_capabilities", "Inspect verified MATLAB fidelity and acceleration capabilities.", Type.Object({}));
+  register(pi, "solver_get_capabilities", "Inspect verified MATLAB 2D/3D profiles and acceleration capabilities.", Type.Object({}));
   register(pi, "subagent_dispatch", "Dispatch a predefined isolated scientific Subagent.", Type.Object({
     role: Type.String(), objective: Type.String(), evidence_ids: Type.Optional(Type.Array(Type.String())),
     proposal_id: Type.Optional(Type.String()),

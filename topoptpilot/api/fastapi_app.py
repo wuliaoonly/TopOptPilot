@@ -1,4 +1,4 @@
-"""Competition/test API. Business behavior is delegated to ResearchService."""
+"""Authenticated local desktop API delegated to ResearchService."""
 
 from __future__ import annotations
 
@@ -30,8 +30,8 @@ async def lifespan(_: FastAPI):
     service.close()
 
 
-app = FastAPI(title="TopOptPilot Test API", version="5.0", lifespan=lifespan,
-              description="Programmatic interface to the same ResearchService used by Streamlit.")
+app = FastAPI(title="TopOptPilot Desktop API", version="6.2.1", lifespan=lifespan,
+              description="Local authenticated interface used by the Tauri desktop workspace.")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["tauri://localhost", "http://tauri.localhost", "https://tauri.localhost"],

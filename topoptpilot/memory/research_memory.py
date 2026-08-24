@@ -4,9 +4,6 @@ from __future__ import annotations
 
 from typing import Any
 
-from topoptpilot.fidelity import FidelityManager
-
-
 class ResearchMemory:
     def build(self, research: dict[str, Any], experiments: list[dict[str, Any]],
               events: list[dict[str, Any]], decisions: list[dict[str, Any]]) -> dict[str, Any]:
@@ -14,7 +11,13 @@ class ResearchMemory:
               for item in experiments if item.get("result")]
         l1 = [self._experiment_record(item) for item in experiments]
         l2 = self._scientific_memory(l1, research.get("constraints", {}))
-        budget = FidelityManager.budget(research, experiments)
+        completed_count = sum(item.get("status") in {"SUCCESS", "FAILED"} for item in experiments)
+        budget = {
+            "total": int(research.get("budget_total", 0)),
+            "used": completed_count,
+            "remaining": max(0, int(research.get("budget_total", 0)) - completed_count),
+            "time_seconds": (research.get("budgets") or {}).get("time_seconds"),
+        }
         l3 = {
             "research_id": research["id"], "goal": research["goal"],
             "constraints": research["constraints"], "hypothesis": research.get("hypothesis"),
@@ -39,7 +42,9 @@ class ResearchMemory:
     def _experiment_record(item: dict) -> dict:
         result = item.get("result") or {}
         return {
-            "id": item["id"], "status": item["status"], "fidelity": item["fidelity"],
+            "id": item["id"], "status": item["status"],
+            "dimension": item.get("dimension"), "solver_profile": item.get("solver_profile", {}),
+            "legacy_fidelity": item.get("legacy_fidelity"),
             "purpose": item["purpose"], "intent": item.get("intent", "MANUAL"),
             "parameters": item["parameters"], "objective": result.get("objective", {}),
             "constraints": result.get("constraints", {}), "quality": result.get("quality", {}),
@@ -52,11 +57,7 @@ class ResearchMemory:
         constraints = constraints or {}
         completed = [item for item in records if item["objective"].get("compliance") is not None]
         feasible = [item for item in completed if item["status"] == "SUCCESS"]
-        rank = {"F0": 0, "F1": 1, "F2": 2, "F3": 3}
-        highest = max((rank.get(str(item["fidelity"]).split()[0], 0) for item in feasible), default=0)
-        comparable = [item for item in feasible
-                      if rank.get(str(item["fidelity"]).split()[0], 0) == highest]
-        best = min(comparable, key=lambda item: item["objective"]["compliance"], default=None)
+        best = min(feasible, key=lambda item: item["objective"]["compliance"], default=None)
         failures = []
         for item in completed:
             quality = item["quality"]
@@ -99,7 +100,7 @@ class ResearchMemory:
             g = candidate["quality"]["gray_ratio"]
             dominated = any(
                 other is not candidate
-                and other["fidelity"] == candidate["fidelity"]
+                and other.get("dimension") == candidate.get("dimension")
                 and other["objective"]["compliance"] <= c
                 and other["quality"]["gray_ratio"] <= g
                 and (other["objective"]["compliance"] < c or other["quality"]["gray_ratio"] < g)
@@ -107,7 +108,8 @@ class ResearchMemory:
             )
             if not dominated:
                 result.append({"experiment_id": candidate["id"], "compliance": c,
-                               "gray_ratio": g, "fidelity": candidate["fidelity"]})
+                               "gray_ratio": g, "dimension": candidate.get("dimension"),
+                               "solver_profile": candidate.get("solver_profile", {})})
         return sorted(result, key=lambda item: item["compliance"])
 
     @staticmethod

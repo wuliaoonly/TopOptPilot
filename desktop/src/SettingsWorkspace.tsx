@@ -1,40 +1,499 @@
-import { useEffect, useState } from "react";
-import { ArrowLeft, Database, Gauge, Globe2, LoaderCircle, RefreshCw, Save, ShieldCheck, Terminal } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import {
+  ArrowLeft,
+  Database,
+  Gauge,
+  Globe2,
+  LoaderCircle,
+  RefreshCw,
+  Save,
+  ShieldCheck,
+  Terminal,
+} from "lucide-react";
 import { api } from "./api";
-import type { AppSettings, SettingsDiagnostics } from "./types";
+import type { AppSettings, MatlabHealth, SettingsDiagnostics } from "./types";
 import "./settings.css";
 
-type Props = { settings: AppSettings; onClose: () => void; onSaved: (value: AppSettings) => void };
-const bytes = (value?: number) => value === undefined ? "—" : `${(value / 1024 / 1024).toFixed(1)} MB`;
+type Props = {
+  settings: AppSettings;
+  onClose: () => void;
+  onSaved: (value: AppSettings) => void;
+};
+const bytes = (value?: number) =>
+  value === undefined ? "—" : `${(value / 1024 / 1024).toFixed(1)} MB`;
 
-export default function SettingsWorkspace({ settings, onClose, onSaved }: Props) {
-  const [draft, setDraft] = useState(settings), [tab, setTab] = useState("general");
-  const [apiKey,setApiKey]=useState("");
-  const [busy, setBusy] = useState(false), [notice, setNotice] = useState(""), [diagnostics, setDiagnostics] = useState<SettingsDiagnostics | null>(null);
-  const zh = draft.locale === "zh-CN"; const l = (cn:string, en:string) => zh ? cn : en;
+export default function SettingsWorkspace({
+  settings,
+  onClose,
+  onSaved,
+}: Props) {
+  const [draft, setDraft] = useState(settings),
+    [tab, setTab] = useState("general");
+  const [apiKey, setApiKey] = useState("");
+  const [busy, setBusy] = useState(false),
+    [notice, setNotice] = useState(""),
+    [diagnostics, setDiagnostics] = useState<SettingsDiagnostics | null>(null);
+  const [matlabBusy, setMatlabBusy] = useState(false),
+    [matlabStatus, setMatlabStatus] = useState<MatlabHealth | null>(null);
+  const mounted = useRef(true);
+  const zh = draft.locale === "zh-CN";
+  const l = (cn: string, en: string) => (zh ? cn : en);
   useEffect(() => setDraft(settings), [settings]);
-  const update = (path: string, value: unknown) => setDraft(current => {
-    const next = structuredClone(current) as Record<string, any>; let cursor: Record<string, any> = next;
-    const parts = path.split("."); parts.slice(0, -1).forEach(key => cursor = cursor[key]); cursor[parts.at(-1)!] = value; return next as AppSettings;
-  });
-  const save = async () => { setBusy(true); try { const value = await api.saveSettings(draft); onSaved(value); setNotice(l("已保存。新研究默认值不会修改已有研究。", "Saved. New-research defaults do not modify existing research.")); } catch (e) { setNotice(String(e)); } finally { setBusy(false); } };
-  const action = async (kind:"agent"|"pi"|"matlab"|"diagnostics"|"cache") => { setBusy(true); try {
-    const result = kind === "agent" ? await api.testAgent() : kind === "pi" ? await api.restartPi() : kind === "matlab" ? await api.restartMatlab() : kind === "diagnostics" ? await api.diagnostics() : await api.clearCache();
-    if (kind === "diagnostics") setDiagnostics(result as SettingsDiagnostics); setNotice(typeof result === "object" ? JSON.stringify(result) : String(result));
-  } catch (e) { setNotice(String(e)); } finally { setBusy(false); } };
-  const field = (label:string, path:string, type="text") => <label className="settings-field">{label}<input type={type} value={String(path.split(".").reduce((a:any,k)=>a?.[k],draft) ?? "")} onChange={e=>update(path,type==="number"?Number(e.target.value):e.target.value)}/></label>;
-  const saveKey=async()=>{setBusy(true);try{await api.setAgentKey(apiKey);setApiKey("");const fresh=await api.settings();setDraft(fresh);onSaved(fresh);setNotice(l("密钥已安全保存到 Windows 凭据管理器。请重启 Pi 会话。","Key saved to Windows Credential Manager. Restart Pi sessions."))}catch(e){setNotice(String(e))}finally{setBusy(false)}};
-  const removeKey=async()=>{setBusy(true);try{await api.deleteAgentKey();const fresh=await api.settings();setDraft(fresh);onSaved(fresh);setNotice(l("已删除凭据管理器中的密钥。","Credential Manager key deleted."))}catch(e){setNotice(String(e))}finally{setBusy(false)}};
-  return <div className="settings-workspace">
-    <header className="settings-title"><button onClick={onClose}><ArrowLeft/> {l("返回工作台","Back to workspace")}</button><div><b>TopOptPilot {l("设置中心","Settings")}</b><small>{l("全局默认值只影响后续新建 Research","Global defaults affect only future Research")}</small></div><button className="approve" disabled={busy} onClick={save}>{busy?<LoaderCircle className="spin"/>:<Save/>}{l("保存设置","Save settings")}</button></header>
-    <aside className="settings-nav">{[["general",<Globe2/>,l("通用","General")],["agent",<Terminal/>,l("Agent 与模型","Agent & model")],["compute",<Gauge/>,l("MATLAB 与计算","MATLAB & compute")],["defaults",<ShieldCheck/>,l("新研究默认值","New research defaults")],["data",<Database/>,l("数据与诊断","Data & diagnostics")]].map(([key,icon,label])=><button key={key as string} className={tab===key?"active":""} onClick={()=>setTab(key as string)}>{icon}{label}</button>)}</aside>
-    <main className="settings-content">
-      {tab==="general" && <section><h1>{l("通用","General")}</h1><div className="settings-grid"><label className="settings-field">{l("默认语言","Default language")}<select value={draft.locale} onChange={e=>update("locale",e.target.value)}><option value="zh-CN">中文</option><option value="en-US">English</option></select></label><label className="settings-field">{l("界面密度","UI density")}<select value={draft.ui_density} onChange={e=>update("ui_density",e.target.value)}><option value="compact">{l("紧凑","Compact")}</option><option value="standard">{l("标准","Standard")}</option><option value="comfortable">{l("舒展","Comfortable")}</option></select></label><label className="settings-field">{l("启动行为","Startup behavior")}<select value={draft.startup_behavior} onChange={e=>update("startup_behavior",e.target.value)}><option value="resume_last">{l("恢复上次研究","Resume last Research")}</option><option value="research_list">{l("打开研究列表","Open Research list")}</option></select></label></div><p>Desktop sidecar · V6.0 · localhost token protected</p></section>}
-      {tab==="agent" && <section><h1>{l("Agent 与模型","Agent & model")}</h1><p>{l("Qwen API Key 状态：","Qwen API key status: ")}<b>{draft.api_key_status}</b>。{l("密钥只存 Windows 凭据管理器，不进入 SQLite、日志、报告或复现包。","The key is stored only in Windows Credential Manager and never enters SQLite, logs, reports, or bundles.")}</p><div className="settings-grid"><label className="settings-field">API Key<input type="password" autoComplete="new-password" placeholder="sk-••••••••" value={apiKey} onChange={e=>setApiKey(e.target.value)}/></label>{field(l("默认模型","Default model"),"agent.model")}{field("OpenAI-compatible Base URL","agent.base_url")}{field(l("请求超时（秒）","Request timeout (s)"),"agent.timeout_seconds","number")}{field(l("自动重试次数","Retries"),"agent.max_retries","number")}<label className="settings-check"><input type="checkbox" checked={draft.agent.safe_mode} onChange={e=>update("agent.safe_mode",e.target.checked)}/>{l("启用 Safe Mode","Enable Safe Mode")}</label></div><button disabled={!apiKey||busy} onClick={saveKey}>{l("安全保存密钥","Save key securely")}</button><button onClick={removeKey}>{l("删除已保存密钥","Delete saved key")}</button><button onClick={()=>action("agent")}>{l("测试连接","Test connection")}</button><button onClick={()=>action("pi")}><RefreshCw/>{l("重启所有 Pi 会话","Restart all Pi sessions")}</button><p>{l("模型配置保存后对新会话生效。","Model settings apply to new sessions.")}</p></section>}
-      {tab==="compute" && <section><h1>{l("MATLAB 与计算","MATLAB & compute")}</h1><div className="settings-grid">{field("MATLAB Root (R2024a)","compute.matlab_root")}{field(l("开发回归并发数","Development regression workers"),"compute.python_workers","number")}{field(l("MATLAB 默认超时（秒）","MATLAB timeout (s)"),"compute.matlab_timeout_seconds","number")}{field(l("MATLAB 自动重试次数","MATLAB retries"),"compute.matlab_retry_count","number")}</div><button onClick={()=>action("matlab")}><RefreshCw/>{l("重启并探测 MATLAB MCP","Restart & probe MATLAB MCP")}</button><p className="warning">{l("正式 F0–F3 全部使用 MATLAB MCP；F3 强制人工审批，任何失败都不回退 Python。","Formal F0–F3 all use MATLAB MCP; F3 requires approval and no failure falls back to Python.")}</p></section>}
-      {tab==="defaults" && <section><h1>新研究默认值</h1><p>不会修改任何已有 Research、实验、决策或复现包。</p><div className="settings-grid">{field("默认模式","new_research.mode")}{field("总预算","new_research.budget_total","number")}{field("F0 预算","new_research.budgets.f0","number")}{field("F1 预算","new_research.budgets.f1","number")}{field("F2 预算","new_research.budgets.f2","number")}{field("F3 预算","new_research.budgets.f3","number")}{field("材料 E","new_research.material.E","number")}{field("泊松比 nu","new_research.material.nu","number")}</div></section>}
-      {tab==="data" && <section><h1>数据与诊断</h1>{field("下次启动使用的新数据目录","data.next_data_dir")}<p>不会自动迁移旧数据；保存后重启应用生效。</p>{field(l("缓存目录（保存时迁移）","Cache directory (migrates on save)"),"data.cache_dir")}<p>{l("填写一个已存在的可写目录后保存：现有缓存文件会立即迁移到新位置，失败会自动回滚。留空则使用默认位置并迁回。","Enter an existing writable directory and save: existing cache files migrate immediately and roll back on failure. Leave empty to use and migrate back to the default location.")}</p>{draft.data.cache_migration&&<p>{l("最近一次迁移：","Last migration: ")}{draft.data.cache_migration.moved_files}{l(" 个文件 → "," file(s) → ")}{draft.data.cache_migration.cache_dir}</p>}<button onClick={()=>action("diagnostics")}>刷新只读诊断快照</button><button onClick={()=>action("cache")}>清理可再生缓存</button><p>清理不会删除 Research 记录或原始 MATLAB 证据。</p>{diagnostics&&<pre className="diagnostics">数据：{diagnostics.data_dir}{"\n"}数据库：{diagnostics.database}{"\n"}缓存目录：{diagnostics.cache_dir ?? "—"}{"\n"}缓存：{bytes(diagnostics.cache_bytes)} · 可用磁盘：{bytes(diagnostics.free_disk_bytes)}{"\n"}{JSON.stringify(diagnostics.health,null,2)}</pre>}</section>}
-      {notice&&<div className="settings-notice">{notice}</div>}
-    </main>
-  </div>;
+  useEffect(
+    () => () => {
+      mounted.current = false;
+    },
+    [],
+  );
+  const update = (path: string, value: unknown) =>
+    setDraft((current) => {
+      const next = structuredClone(current) as Record<string, any>;
+      let cursor: Record<string, any> = next;
+      const parts = path.split(".");
+      parts.slice(0, -1).forEach((key) => (cursor = cursor[key]));
+      cursor[parts.at(-1)!] = value;
+      return next as AppSettings;
+    });
+  const save = async () => {
+    setBusy(true);
+    try {
+      const value = await api.saveSettings(draft);
+      onSaved(value);
+      setNotice(
+        l(
+          "已保存。新研究默认值不会修改已有研究。",
+          "Saved. New-research defaults do not modify existing research.",
+        ),
+      );
+    } catch (e) {
+      setNotice(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  const action = async (kind: "agent" | "pi" | "diagnostics" | "cache") => {
+    setBusy(true);
+    try {
+      const result =
+        kind === "agent"
+          ? await api.testAgent()
+          : kind === "pi"
+            ? await api.restartPi()
+            : kind === "diagnostics"
+              ? await api.diagnostics()
+              : await api.clearCache();
+      if (kind === "diagnostics") setDiagnostics(result as SettingsDiagnostics);
+      setNotice(
+        typeof result === "object" ? JSON.stringify(result) : String(result),
+      );
+    } catch (e) {
+      setNotice(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  const field = (label: string, path: string, type = "text") => (
+    <label className="settings-field">
+      {label}
+      <input
+        type={type}
+        value={String(
+          path.split(".").reduce((a: any, k) => a?.[k], draft) ?? "",
+        )}
+        onChange={(e) =>
+          update(
+            path,
+            type === "number" ? Number(e.target.value) : e.target.value,
+          )
+        }
+      />
+    </label>
+  );
+  const saveKey = async () => {
+    setBusy(true);
+    try {
+      await api.setAgentKey(apiKey);
+      setApiKey("");
+      const fresh = await api.settings();
+      setDraft(fresh);
+      onSaved(fresh);
+      setNotice(
+        l(
+          "密钥已安全保存到 Windows 凭据管理器。请重启 Pi 会话。",
+          "Key saved to Windows Credential Manager. Restart Pi sessions.",
+        ),
+      );
+    } catch (e) {
+      setNotice(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  const removeKey = async () => {
+    setBusy(true);
+    try {
+      await api.deleteAgentKey();
+      const fresh = await api.settings();
+      setDraft(fresh);
+      onSaved(fresh);
+      setNotice(
+        l("已删除凭据管理器中的密钥。", "Credential Manager key deleted."),
+      );
+    } catch (e) {
+      setNotice(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  const restartMatlab = async () => {
+    setMatlabBusy(true);
+    setNotice(
+      l(
+        "正在提交 MATLAB MCP 重启与能力探测…",
+        "Submitting MATLAB MCP restart and capability probe…",
+      ),
+    );
+    try {
+      let current = await api.restartMatlab();
+      if (mounted.current) setMatlabStatus(current);
+      const deadline = Date.now() + 180_000;
+      while (
+        current.restart?.running &&
+        mounted.current &&
+        Date.now() < deadline
+      ) {
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+        current = await api.matlabHealth();
+        if (mounted.current) setMatlabStatus(current);
+      }
+      if (!mounted.current) return;
+      if (current.restart?.running) {
+        setNotice(
+          l(
+            "MATLAB 仍在后台启动；可离开设置页，稍后刷新状态。",
+            "MATLAB is still starting in the background; you can leave Settings and refresh later.",
+          ),
+        );
+      } else if (
+        current.state === "READY" &&
+        current.capabilities?.probed === true
+      ) {
+        setNotice(
+          l(
+            "MATLAB MCP 已连接，受控能力探测通过。",
+            "MATLAB MCP connected and the controlled capability probe passed.",
+          ),
+        );
+      } else {
+        setNotice(
+          l("MATLAB MCP 探测失败：", "MATLAB MCP probe failed: ") +
+            (current.last_error ||
+              l("未返回错误详情", "No error details returned")),
+        );
+      }
+    } catch (e) {
+      if (mounted.current)
+        setNotice(
+          l(
+            "无法获取 MATLAB MCP 状态：",
+            "Unable to read MATLAB MCP status: ",
+          ) + String(e),
+        );
+    } finally {
+      if (mounted.current) setMatlabBusy(false);
+    }
+  };
+  const phase = (value?: string) =>
+    ({
+      IDLE: l("空闲", "Idle"),
+      QUEUED: l("已排队", "Queued"),
+      CONFIGURING: l("应用配置", "Applying configuration"),
+      STARTING_MCP: l("启动 MCP / MATLAB", "Starting MCP / MATLAB"),
+      PROBING_CAPABILITIES: l(
+        "探测受控能力",
+        "Probing controlled capabilities",
+      ),
+      READY: l("探测通过", "Probe passed"),
+      FAILED: l("探测失败", "Probe failed"),
+    })[value || ""] ||
+    value ||
+    "—";
+  return (
+    <div className="settings-workspace">
+      <header className="settings-title">
+        <button onClick={onClose}>
+          <ArrowLeft /> {l("返回工作台", "Back to workspace")}
+        </button>
+        <div>
+          <b>TopOptPilot {l("设置中心", "Settings")}</b>
+          <small>
+            {l(
+              "全局默认值只影响后续新建 Research",
+              "Global defaults affect only future Research",
+            )}
+          </small>
+        </div>
+        <button className="approve" disabled={busy} onClick={save}>
+          {busy ? <LoaderCircle className="spin" /> : <Save />}
+          {l("保存设置", "Save settings")}
+        </button>
+      </header>
+      <aside className="settings-nav">
+        {[
+          ["general", <Globe2 />, l("通用", "General")],
+          ["agent", <Terminal />, l("Agent 与模型", "Agent & model")],
+          ["compute", <Gauge />, l("MATLAB 与计算", "MATLAB & compute")],
+          [
+            "defaults",
+            <ShieldCheck />,
+            l("新研究默认值", "New research defaults"),
+          ],
+          ["data", <Database />, l("数据与诊断", "Data & diagnostics")],
+        ].map(([key, icon, label]) => (
+          <button
+            key={key as string}
+            className={tab === key ? "active" : ""}
+            onClick={() => setTab(key as string)}
+          >
+            {icon}
+            {label}
+          </button>
+        ))}
+      </aside>
+      <main className="settings-content">
+        {tab === "general" && (
+          <section>
+            <h1>{l("通用", "General")}</h1>
+            <div className="settings-grid">
+              <label className="settings-field">
+                {l("默认语言", "Default language")}
+                <select
+                  value={draft.locale}
+                  onChange={(e) => update("locale", e.target.value)}
+                >
+                  <option value="zh-CN">中文</option>
+                  <option value="en-US">English</option>
+                </select>
+              </label>
+              <label className="settings-field">
+                {l("界面密度", "UI density")}
+                <select
+                  value={draft.ui_density}
+                  onChange={(e) => update("ui_density", e.target.value)}
+                >
+                  <option value="compact">{l("紧凑", "Compact")}</option>
+                  <option value="standard">{l("标准", "Standard")}</option>
+                  <option value="comfortable">
+                    {l("舒展", "Comfortable")}
+                  </option>
+                </select>
+              </label>
+              <label className="settings-field">
+                {l("启动行为", "Startup behavior")}
+                <select
+                  value={draft.startup_behavior}
+                  onChange={(e) => update("startup_behavior", e.target.value)}
+                >
+                  <option value="resume_last">
+                    {l("恢复上次研究", "Resume last Research")}
+                  </option>
+                  <option value="research_list">
+                    {l("打开研究列表", "Open Research list")}
+                  </option>
+                </select>
+              </label>
+            </div>
+            <p>Desktop sidecar · V6.0 · localhost token protected</p>
+          </section>
+        )}
+        {tab === "agent" && (
+          <section>
+            <h1>{l("Agent 与模型", "Agent & model")}</h1>
+            <p>
+              {l("OpenAI-compatible API Key 状态：", "OpenAI-compatible API key status: ")}
+              <b>{draft.api_key_status}</b>。
+              {l(
+                "密钥只存 Windows 凭据管理器，不进入 SQLite、日志、报告或复现包。",
+                "The key is stored only in Windows Credential Manager and never enters SQLite, logs, reports, or bundles.",
+              )}
+            </p>
+            <div className="settings-grid">
+              <label className="settings-field">
+                API Key
+                <input
+                  type="password"
+                  autoComplete="new-password"
+                  placeholder="sk-••••••••"
+                  value={apiKey}
+                  onChange={(e) => setApiKey(e.target.value)}
+                />
+              </label>
+              {field(l("默认模型", "Default model"), "agent.model")}
+              {field("OpenAI-compatible Base URL", "agent.base_url")}
+              {field(
+                l("请求超时（秒）", "Request timeout (s)"),
+                "agent.timeout_seconds",
+                "number",
+              )}
+              {field(
+                l("自动重试次数", "Retries"),
+                "agent.max_retries",
+                "number",
+              )}
+              <label className="settings-check">
+                <input
+                  type="checkbox"
+                  checked={draft.agent.safe_mode}
+                  onChange={(e) => update("agent.safe_mode", e.target.checked)}
+                />
+                {l("启用 Safe Mode", "Enable Safe Mode")}
+              </label>
+            </div>
+            <button disabled={!apiKey || busy} onClick={saveKey}>
+                  {l("安全保存/替换密钥", "Save or replace key securely")}
+            </button>
+            <button onClick={removeKey}>
+              {l("删除已保存密钥", "Delete saved key")}
+            </button>
+            <button onClick={() => action("agent")}>
+              {l("测试连接", "Test connection")}
+            </button>
+            <button onClick={() => action("pi")}>
+              <RefreshCw />
+              {l("重启所有 Pi 会话", "Restart all Pi sessions")}
+            </button>
+              <p>
+                {l(
+                "请求地址保存在应用设置中；密钥替换写入同一个 Windows 凭据项。覆盖失败时旧凭据保持不变，并继续使用环境变量回退（如存在）。",
+                "The URL is stored in app settings; key rotation writes the same Windows credential. If replacement fails, the old credential remains and environment fallback is used when available.",
+                )}
+              </p>
+          </section>
+        )}
+        {tab === "compute" && (
+          <section>
+            <h1>{l("MATLAB 与计算", "MATLAB & compute")}</h1>
+            <div className="settings-grid">
+              {field("MATLAB Root (R2024a)", "compute.matlab_root")}
+              {field(
+                l("开发回归并发数", "Development regression workers"),
+                "compute.python_workers",
+                "number",
+              )}
+              {field(
+                l("MATLAB 默认超时（秒）", "MATLAB timeout (s)"),
+                "compute.matlab_timeout_seconds",
+                "number",
+              )}
+              {field(
+                l("MATLAB 自动重试次数", "MATLAB retries"),
+                "compute.matlab_retry_count",
+                "number",
+              )}
+            </div>
+            <button disabled={matlabBusy} onClick={restartMatlab}>
+              {matlabBusy ? <LoaderCircle className="spin" /> : <RefreshCw />}
+              {l("重启并探测 MATLAB MCP", "Restart & probe MATLAB MCP")}
+            </button>
+            {matlabStatus && (
+              <div
+                className={`matlab-probe ${matlabStatus.state.toLowerCase()}`}
+              >
+                <header>
+                  <b>{l("MATLAB MCP 探测状态", "MATLAB MCP probe status")}</b>
+                  <span>{matlabStatus.state}</span>
+                </header>
+                <dl>
+                  <dt>{l("当前阶段", "Current phase")}</dt>
+                  <dd>{phase(matlabStatus.restart?.phase)}</dd>
+                  <dt>{l("MCP 进程", "MCP process")}</dt>
+                  <dd>
+                    {matlabStatus.process_running
+                      ? l("正在运行", "Running")
+                      : l("未运行", "Not running")}
+                  </dd>
+                  <dt>{l("受控能力", "Controlled capabilities")}</dt>
+                  <dd>
+                    {matlabStatus.capabilities?.probed
+                      ? l("已验证", "Verified")
+                      : l("尚未验证", "Not verified")}
+                  </dd>
+                  <dt>{l("服务版本", "Server version")}</dt>
+                  <dd>{matlabStatus.server_version || "—"}</dd>
+                </dl>
+                {matlabStatus.last_error && (
+                  <pre>{matlabStatus.last_error}</pre>
+                )}
+              </div>
+            )}
+            <p className="warning">
+              {l(
+                "所有正式 2D/3D 求解均使用 MATLAB MCP；COPILOT 等待人工确认，任何失败都不回退 Python。",
+                "Every formal 2D/3D solve uses MATLAB MCP; COPILOT waits for confirmation and no failure falls back to Python.",
+              )}
+            </p>
+          </section>
+        )}
+        {tab === "defaults" && (
+          <section>
+            <h1>新研究默认值</h1>
+            <p>不会修改任何已有 Research、实验、决策或复现包。</p>
+            <div className="settings-grid">
+              {field("默认模式", "new_research.mode")}
+              {field("总预算", "new_research.budget_total", "number")}
+              {field(
+                "总计算时间（秒）",
+                "new_research.budgets.time_seconds",
+                "number",
+              )}
+              {field("材料 E", "new_research.material.E", "number")}
+              {field("泊松比 nu", "new_research.material.nu", "number")}
+            </div>
+          </section>
+        )}
+        {tab === "data" && (
+          <section>
+            <h1>数据与诊断</h1>
+            {field("下次启动使用的新数据目录", "data.next_data_dir")}
+            <p>不会自动迁移旧数据；保存后重启应用生效。</p>
+            {field(
+              l("缓存目录（保存时迁移）", "Cache directory (migrates on save)"),
+              "data.cache_dir",
+            )}
+            <p>
+              {l(
+                "填写一个已存在的可写目录后保存：现有缓存文件会立即迁移到新位置，失败会自动回滚。留空则使用默认位置并迁回。",
+                "Enter an existing writable directory and save: existing cache files migrate immediately and roll back on failure. Leave empty to use and migrate back to the default location.",
+              )}
+            </p>
+            {draft.data.cache_migration && (
+              <p>
+                {l("最近一次迁移：", "Last migration: ")}
+                {draft.data.cache_migration.moved_files}
+                {l(" 个文件 → ", " file(s) → ")}
+                {draft.data.cache_migration.cache_dir}
+              </p>
+            )}
+            <button onClick={() => action("diagnostics")}>
+              刷新只读诊断快照
+            </button>
+            <button onClick={() => action("cache")}>清理可再生缓存</button>
+            <p>清理不会删除 Research 记录或原始 MATLAB 证据。</p>
+            {diagnostics && (
+              <pre className="diagnostics">
+                数据：{diagnostics.data_dir}
+                {"\n"}数据库：{diagnostics.database}
+                {"\n"}缓存目录：{diagnostics.cache_dir ?? "—"}
+                {"\n"}缓存：{bytes(diagnostics.cache_bytes)} · 可用磁盘：
+                {bytes(diagnostics.free_disk_bytes)}
+                {"\n"}
+                {JSON.stringify(diagnostics.health, null, 2)}
+              </pre>
+            )}
+          </section>
+        )}
+        {notice && <div className="settings-notice">{notice}</div>}
+      </main>
+    </div>
+  );
 }

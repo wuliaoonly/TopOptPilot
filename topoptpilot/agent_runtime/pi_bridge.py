@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import queue
+import re
 import subprocess
 import threading
 import time
@@ -14,7 +15,6 @@ from typing import Any, Callable
 
 from .event_mapper import map_pi_event
 from .tool_gateway import ToolGateway
-from .reviewer import ReviewerWorkflow
 from .pi_session import PiSessionRegistry
 from .subagents import SubagentCoordinator
 
@@ -25,8 +25,7 @@ MAIN_TOOLS = (
     "experiment_compare,research_get_pareto,failure_get_evidence,knowledge_search,knowledge_get,"
     "solver_get_capabilities,subagent_dispatch,subagent_status"
 )
-# Compatibility alias for release audits and V5 regression tests. The value now
-# includes only the expanded V6 controlled tool surface.
+# Public alias used by tool-sandbox tests and diagnostics.
 TOOLS = MAIN_TOOLS
 
 
@@ -66,7 +65,7 @@ class PiProcess:
             })
             session_id = self.session_id_override or self.bridge.sessions.session_id(self.research_id)
             args = [str(self.bridge.node), str(self.bridge.cli), "--mode", "rpc",
-                "--provider", "dashscope", "--model", self.bridge.model,
+                "--provider", "openai-compatible", "--model", self.bridge.model,
                 "--session-id", session_id,
                 "--session-dir", str(self.bridge.session_dir),
                 "--no-extensions", "--extension", str(self.bridge.root / ".pi/extensions/topopt-tools.ts"),
@@ -171,12 +170,29 @@ class PiProcess:
                               if isinstance(item, dict) and item.get("errorMessage")), None)
                 if self.task_id:
                     result_text = _assistant_text(messages) or self._stream_buffer
+                    # Some OpenAI-compatible relays deliver the complete text but omit the
+                    # terminal finish_reason.  Pi correctly surfaces that protocol defect as
+                    # an error; for a bounded read-only Subagent, a substantive text result is
+                    # still usable evidence.  Preserve the warning instead of discarding the
+                    # answer or triggering an unrelated fallback.
+                    partial_stream_recovered = bool(
+                        failed and result_text.strip() and error
+                        and "stream ended without finish_reason" in error.lower()
+                    )
+                    if partial_stream_recovered:
+                        failed = False
+                        self.bridge.service.store.append_event(
+                            self.research_id, "SYSTEM", "PARTIAL STREAM RECOVERED",
+                            "The compatible endpoint omitted finish_reason; the bounded Subagent "
+                            "result was retained and marked degraded.",
+                            payload={"task_id": self.task_id, "warning": error},
+                            source=f"SUBAGENT:{self.role}", event_type="FAILURE")
                     status = "FAILED" if failed else "COMPLETED"
                     self.bridge.service.store.update_subagent_task(
                         self.task_id, status=status, result={"text": result_text},
-                        error=error, completed_at=_utc_now())
+                        error=(error if failed else None), completed_at=_utc_now())
                     task = self.bridge.service.store.get_subagent_task(self.task_id) or {}
-                    if not failed and self.role == "HYPOTHESIS" and result_text:
+                    if not failed and self.role == "SCIENTIST" and result_text:
                         research = self.bridge.service._require_research(self.research_id)
                         self.bridge.service.store.create_hypothesis({
                             "id": f"H-{uuid.uuid4().hex[:10].upper()}",
@@ -189,18 +205,82 @@ class PiProcess:
                             self.research_id, "HYPOTHESIS", "HYPOTHESIS CREATED", result_text,
                             payload={"task_id": self.task_id, "evidence_ids": task.get("evidence_ids", [])},
                             source=f"SUBAGENT:{self.role}", event_type="HYPOTHESIS_CREATED")
+                    if (not failed and self.role == "GUIDE"
+                            and "ESCALATE_TO_LEAD" in result_text.upper()):
+                        question = str(task.get("objective") or "")
+                        marker = "User question:"
+                        if marker in question:
+                            question = question.split(marker, 1)[1].strip()
+                        self.bridge.service.store.append_event(
+                            self.research_id, "SYSTEM", "GUIDE ESCALATED TO LEAD",
+                            "The isolated Guide identified a scientific decision request and transferred it.",
+                            payload={"task_id": self.task_id, "question": question},
+                            source="ROUTER", event_type="AGENT_MESSAGE")
+                        threading.Thread(
+                            target=self.bridge.send,
+                            args=(self.research_id,
+                                  "The isolated Guide escalated this scientific request. First call "
+                                  "research_get_context, then answer or plan using only authoritative tools. "
+                                  f"Researcher request: {question}",
+                                  "causal-reasoning"),
+                            daemon=True,
+                        ).start()
                     if not failed and self.role == "INDEPENDENT_REVIEWER" and task.get("proposal_id"):
                         proposal = self.bridge.service.store.get_proposal(task["proposal_id"])
-                        verdict = next((item for item in ("APPROVE", "REVISE", "REJECT")
-                                        if item in result_text.upper()), "REVISE")
-                        if proposal and proposal.get("experiment_id"):
-                            self.bridge.service.store.update_experiment(
-                                proposal["experiment_id"], review_verdict=verdict)
+                        verdict = _review_verdict(result_text)
+                        if proposal:
+                            self.bridge.service.store.update_proposal(
+                                task["proposal_id"], status=f"REVIEW_{verdict}")
                         self.bridge.service.store.append_event(
                             self.research_id, "REVIEW", "REVIEW VERDICT", verdict,
                             payload={"task_id": self.task_id, "proposal_id": task["proposal_id"],
                                      "verdict": verdict},
                             source=f"SUBAGENT:{self.role}", event_type="REVIEW_VERDICT")
+                        lead = self.bridge.processes.get(self.research_id)
+                        if lead and verdict == "APPROVE":
+                            threading.Thread(
+                                target=lead.prompt,
+                                args=(f"INDEPENDENT_REVIEWER approved proposal {task['proposal_id']}. "
+                                      "Call experiment_submit for that proposal again; do not change its parameters.",),
+                                daemon=True,
+                            ).start()
+                        elif lead and verdict in {"REVISE", "REJECT"}:
+                            proposals = self.bridge.service.store.list_proposals(self.research_id)
+                            corrections = sum(
+                                1 for item in proposals
+                                if item.get("status") in {"REVIEW_REVISE", "REVIEW_REJECT"}
+                            )
+                            if corrections <= 2:
+                                threading.Thread(
+                                    target=lead.prompt,
+                                    args=(
+                                        f"INDEPENDENT_REVIEWER returned {verdict} for proposal "
+                                        f"{task['proposal_id']}. Read the reviewer result and authoritative "
+                                        "Research State. Do not resubmit that proposal. Dispatch SCIENTIST if "
+                                        "needed, compile one safer or better-controlled replacement through "
+                                        "policy_compile_intent, preview it, and submit it. Never write numeric "
+                                        "solver parameters directly.",
+                                    ),
+                                    daemon=True,
+                                ).start()
+                            else:
+                                self.bridge.service.store.update_research(
+                                    self.research_id, status="PAUSED")
+                                self.bridge.service.store.append_event(
+                                    self.research_id, "HUMAN", "REVIEW CORRECTION PAUSED",
+                                    "Two automatic review corrections were unsuccessful; human direction is required.",
+                                    payload={"proposal_id": task["proposal_id"], "verdict": verdict},
+                                    source="HUMAN_GATE", event_type="HUMAN_DECISION")
+                    if (not failed and self.role == "INDEPENDENT_REVIEWER"
+                            and not task.get("proposal_id")
+                            and "termination and conclusion" in str(task.get("objective", "")).lower()):
+                        paths = self.bridge.service.report_generator.generate(
+                            self.bridge.service.get_research(self.research_id))
+                        self.bridge.service.store.append_event(
+                            self.research_id, "SYSTEM", "FINAL REPORT READY",
+                            str(paths["markdown"]),
+                            payload={key: str(value) for key, value in paths.items()},
+                            source="DETERMINISTIC_REPORT", event_type="REPORT_READY")
                     self.bridge.service.store.append_event(
                         self.research_id, "SUBAGENT", f"{self.role} {status}",
                         result_text or error or f"Subagent task {self.task_id} ended.",
@@ -258,13 +338,12 @@ class PiBridge:
         self.listeners: list[Callable[[str, dict], None]] = []
         self.sessions = PiSessionRegistry(service.store)
         self.gateway = ToolGateway(service).start()
-        self.reviewer = ReviewerWorkflow(self)
         self.subagents = SubagentCoordinator(self)
         self._write_config()
 
     def _write_config(self):
         example = json.loads((self.root / ".pi/models.example.json").read_text(encoding="utf-8"))
-        provider = example["providers"]["dashscope"]
+        provider = example["providers"]["openai-compatible"]
         provider["baseUrl"] = self.base_url
         provider["models"][0]["id"] = self.model
         provider["models"][0]["name"] = self.model
@@ -341,3 +420,9 @@ def _assistant_text(messages: list[dict]) -> str:
             return "\n".join(str(item.get("text", "")) for item in content
                               if isinstance(item, dict) and item.get("type") == "text").strip()
     return ""
+
+
+def _review_verdict(text: str) -> str:
+    """Read the reviewer's leading verdict without being confused by its rationale."""
+    match = re.search(r"\b(APPROVE|REVISE|REJECT)\b", text[:160].upper())
+    return match.group(1) if match else "REVISE"

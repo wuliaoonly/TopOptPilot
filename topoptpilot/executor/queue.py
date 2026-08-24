@@ -34,7 +34,7 @@ def _run_solver(task: dict[str, Any], backend: str, progress_path: str) -> dict[
     if backend == "python3d":
         from solver.topopt3d import run_topopt3d
         return run_topopt3d(task, progress=progress)
-    if backend == "matlab":
+    if backend == "MATLAB_MCP":
         raise RuntimeError("MATLAB jobs must use the persistent restricted MatlabMcpWorker")
     from solver.topopt_engine import run_topopt
     return run_topopt(task, backend=backend, progress=progress)

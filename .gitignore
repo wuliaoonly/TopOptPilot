@@ -70,6 +70,9 @@ vendor/
 # Competition original materials
 XH-202619*.pdf
 
+# E2E packaged runtime test artifacts (auth.json, session logs, db)
+.runtime-tests/
+
 # Archives
 *.rar
 *.zip

@@ -47,15 +47,10 @@ def run_topopt(task_spec, *, backend: str = "python",
     """运行一次拓扑优化，返回 ExperimentResult 兼容的 dict。
 
     task_spec: ExperimentTask 或已规范化的 dict（由 params.normalize_task 处理）。
-    backend:   "python"（numpy/scipy）或 "matlab"（MATLAB Engine，见 matlab_backend）。
+    backend:   仅用于 Python 开发回归；正式产品求解由 MATLAB MCP Worker 执行。
     time_limit: 秒；超时则返回 status="timeout"（保留已达成的密度/历史）。
     progress:   可选回调 progress(iteration, state)。
     """
-    if backend == "matlab":
-        from solver.matlab_backend import run_topopt_matlab
-        return run_topopt_matlab(task_spec, max_iter_override=max_iter_override,
-                                 time_limit=time_limit, progress=progress)
-
     spec = normalize_task(task_spec)
     t0 = time.time()
     nelx, nely = spec["nelx"], spec["nely"]

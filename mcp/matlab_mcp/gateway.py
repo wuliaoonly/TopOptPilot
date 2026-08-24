@@ -17,7 +17,8 @@ class MatlabGateway:
         self.connector = connector
         self.research_root = Path(research_root).resolve()
 
-    def run_topopt_task(self, task_path: str | Path, result_path: str | Path) -> dict[str, Any]:
+    def run_topopt_task(self, task_path: str | Path, result_path: str | Path,
+                        *, timeout: float | None = None) -> dict[str, Any]:
         task = Path(task_path).resolve()
         result = Path(result_path).resolve()
         for path in (task, result):
@@ -39,7 +40,7 @@ class MatlabGateway:
                 and .75 <= float(config.get("rmin", -1)) <= 4
                 and 1 <= float(config.get("penal", -1)) <= 5):
             raise MatlabMcpError("MATLAB task escaped the approved parameter envelope")
-        return self.connector.call_topopt(task, result)
+        return self.connector.call_topopt(task, result, timeout=timeout)
 
     def health(self) -> dict[str, Any]:
         value = self.connector.health()

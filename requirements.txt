@@ -1,7 +1,6 @@
 # TopOptPilot Python Dependencies
 # AI Scientist Layer
-pi-agent[openai]==0.1.0 # Safe-mode Python fallback; official Pi RPC is installed by npm
-openai>=1.0.0          # OpenAI-compatible fallback transport
+openai>=1.0.0          # OpenAI-compatible Qwen transport used by the Pi runtime adapter
 pydantic>=2.0.0        # Data modeling & validation
 pyyaml>=6.0            # Config & method cards
 

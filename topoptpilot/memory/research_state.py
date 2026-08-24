@@ -142,6 +142,12 @@ class ResearchStateStore:
                 "contract_json": "TEXT NOT NULL DEFAULT '{}'",
             })
             self._ensure_columns(db, "experiments", {
+                "dimension": "INTEGER NOT NULL DEFAULT 2",
+                "solver_profile_json": "TEXT NOT NULL DEFAULT '{}'",
+                "estimated_seconds": "REAL NOT NULL DEFAULT 0",
+                "estimated_memory_mb": "REAL NOT NULL DEFAULT 0",
+                "execution_mode": "TEXT NOT NULL DEFAULT 'COPILOT'",
+                "legacy_fidelity": "TEXT",
                 "proposal_id": "TEXT",
                 "intent": "TEXT NOT NULL DEFAULT 'MANUAL'",
                 "cached": "INTEGER NOT NULL DEFAULT 0",
@@ -173,6 +179,11 @@ class ResearchStateStore:
                 "evidence_ids_json": "TEXT NOT NULL DEFAULT '[]'",
             })
             self._ensure_columns(db, "proposals", {
+                "dimension": "INTEGER NOT NULL DEFAULT 2",
+                "solver_profile_json": "TEXT NOT NULL DEFAULT '{}'",
+                "estimated_seconds": "REAL NOT NULL DEFAULT 0",
+                "estimated_memory_mb": "REAL NOT NULL DEFAULT 0",
+                "execution_mode": "TEXT NOT NULL DEFAULT 'COPILOT'",
                 "decision_source": "TEXT NOT NULL DEFAULT 'HUMAN'",
                 "intent_source": "TEXT NOT NULL DEFAULT 'HUMAN'",
                 "policy_version": "TEXT NOT NULL DEFAULT 'v6-intent-compiler-1'",
@@ -185,6 +196,12 @@ class ResearchStateStore:
                 "stream_text": "TEXT NOT NULL DEFAULT ''",
                 "last_error": "TEXT",
             })
+            # Preserve pre-direct-solver records without letting their former
+            # level participate in new Policy decisions or public presentation.
+            db.execute("""UPDATE experiments
+                          SET legacy_fidelity=fidelity,
+                              dimension=CASE WHEN fidelity LIKE 'F2%' OR fidelity LIKE 'F3%' THEN 3 ELSE 2 END
+                          WHERE fidelity <> 'DIRECT' AND legacy_fidelity IS NULL""")
 
     @staticmethod
     def _ensure_columns(db: sqlite3.Connection, table: str, columns: dict[str, str]) -> None:
@@ -276,13 +293,17 @@ class ResearchStateStore:
             ).fetchone()[0]
             db.execute("""INSERT INTO experiments
                 (id,research_id,ordinal,purpose,fidelity,mesh_level,backend,parameters_json,
+                 dimension,solver_profile_json,estimated_seconds,estimated_memory_mb,execution_mode,legacy_fidelity,
                  warm_start,status,safety,created_at,proposal_id,intent,round_number,decision_source,
                  intent_source,policy_version,model,provider,session_id,evidence_ids_json,result_source,
                  knowledge_ids_json,subagent_task_ids_json,solver_variant,acceleration_mode,
                  review_verdict,human_decision)
-                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (data["id"], data["research_id"], ordinal, data["purpose"], data["fidelity"],
                  data["mesh_level"], data["backend"], json.dumps(data["parameters"]),
+                 data.get("dimension", 2), json.dumps(data.get("solver_profile", {})),
+                 data.get("estimated_seconds", 0), data.get("estimated_memory_mb", 0),
+                 data.get("execution_mode", "COPILOT"), data.get("legacy_fidelity"),
                  data.get("warm_start"), data["status"], data.get("safety", "LOW"), now,
                  data.get("proposal_id"), data.get("intent", "MANUAL"), data.get("round_number", 1),
                  data.get("decision_source", "HUMAN"), data.get("intent_source", "HUMAN"),
@@ -298,7 +319,7 @@ class ResearchStateStore:
     def get_experiment(self, experiment_id: str) -> dict | None:
         with self.connection() as db:
             row = db.execute("SELECT * FROM experiments WHERE id=?", (experiment_id,)).fetchone()
-        return self._decode(row, ("parameters", "result", "evidence_ids", "knowledge_ids",
+        return self._decode(row, ("parameters", "result", "solver_profile", "evidence_ids", "knowledge_ids",
                                   "subagent_task_ids"))
 
     def list_experiments(self, research_id: str) -> list[dict]:
@@ -306,14 +327,15 @@ class ResearchStateStore:
             rows = db.execute(
                 "SELECT * FROM experiments WHERE research_id=? ORDER BY ordinal", (research_id,)
             ).fetchall()
-        return [self._decode(row, ("parameters", "result", "evidence_ids", "knowledge_ids",
+        return [self._decode(row, ("parameters", "result", "solver_profile", "evidence_ids", "knowledge_ids",
                                    "subagent_task_ids")) for row in rows]
 
     def update_experiment(self, experiment_id: str, **fields: Any) -> dict:
         allowed = {"status", "progress", "current_iteration", "run_id", "safety",
                    "error", "started_at", "completed_at", "purpose", "fidelity", "proposal_id",
                    "intent", "cached", "result_source", "solver_variant", "acceleration_mode",
-                   "solver_sha256", "task_hash", "review_verdict", "human_decision"}
+                   "solver_sha256", "task_hash", "review_verdict", "human_decision", "dimension",
+                   "estimated_seconds", "estimated_memory_mb", "execution_mode", "legacy_fidelity"}
         assignments, values = [], []
         for name, value in fields.items():
             if name in allowed:
@@ -322,6 +344,9 @@ class ResearchStateStore:
         if "parameters" in fields:
             assignments.append("parameters_json=?")
             values.append(json.dumps(fields["parameters"]))
+        if "solver_profile" in fields:
+            assignments.append("solver_profile_json=?")
+            values.append(json.dumps(fields["solver_profile"]))
         if "result" in fields:
             assignments.append("result_json=?")
             values.append(json.dumps(fields["result"], default=_json_default))
@@ -404,13 +429,17 @@ class ResearchStateStore:
         with self._lock, self.connection() as db:
             db.execute("""INSERT INTO proposals
                 (id,research_id,intent,purpose,fidelity,backend,parameters_json,estimated_cost,
+                 dimension,solver_profile_json,estimated_seconds,estimated_memory_mb,execution_mode,
                  risk,safety_status,approval_required,source_experiment,controlled_factors_json,
                  status,experiment_id,created_at,updated_at,decision_source,intent_source,
                  policy_version,model,provider,session_id,evidence_ids_json)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (data["id"], data["research_id"], data["intent"], data["purpose"],
-                 data["fidelity"], data["backend"], json.dumps(data["parameters"]),
-                 data["estimated_cost"], data["risk"], data["safety_status"],
+                  data["fidelity"], data["backend"], json.dumps(data["parameters"]),
+                  data["estimated_cost"], data.get("dimension", 2),
+                  json.dumps(data.get("solver_profile", {})), data.get("estimated_seconds", 0),
+                  data.get("estimated_memory_mb", 0), data.get("execution_mode", "COPILOT"),
+                  data["risk"], data["safety_status"],
                  int(data.get("approval_required", False)), data.get("source_experiment"),
                  json.dumps(data.get("controlled_factors", [])), data.get("status", "PREVIEW"),
                  data.get("experiment_id"), now, now, data.get("decision_source", "HUMAN"),
@@ -422,13 +451,13 @@ class ResearchStateStore:
     def get_proposal(self, proposal_id: str) -> dict | None:
         with self.connection() as db:
             row = db.execute("SELECT * FROM proposals WHERE id=?", (proposal_id,)).fetchone()
-        return self._decode(row, ("parameters", "controlled_factors", "evidence_ids"))
+        return self._decode(row, ("parameters", "solver_profile", "controlled_factors", "evidence_ids"))
 
     def list_proposals(self, research_id: str) -> list[dict]:
         with self.connection() as db:
             rows = db.execute("SELECT * FROM proposals WHERE research_id=? ORDER BY created_at",
                               (research_id,)).fetchall()
-        return [self._decode(row, ("parameters", "controlled_factors", "evidence_ids")) for row in rows]
+        return [self._decode(row, ("parameters", "solver_profile", "controlled_factors", "evidence_ids")) for row in rows]
 
     def update_proposal(self, proposal_id: str, **fields: Any) -> dict:
         allowed = {"status", "experiment_id", "safety_status"}

@@ -3,8 +3,7 @@
 
 def coarse_beta_sweep(volfrac: float = 0.4) -> list[dict]:
     return [
-        {"purpose": f"Coarse beta={beta} screening", "fidelity": "F0 — 2D Coarse",
-         "mesh_level": "coarse", "parameters": {
+        {"purpose": f"Controlled beta={beta} screening", "parameters": {
              "volfrac": volfrac, "rmin": 1.5, "penal": 3, "beta": beta, "max_iter": 60,
          }}
         for beta in (1, 4, 8)

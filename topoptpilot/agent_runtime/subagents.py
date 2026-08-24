@@ -11,36 +11,22 @@ from topoptpilot.schemas import AgentRole
 
 ROLE_TOOLS = {
     AgentRole.GUIDE: "research_get_context,knowledge_search,knowledge_get,solver_get_capabilities",
-    AgentRole.HYPOTHESIS: (
+    AgentRole.SCIENTIST: (
         "research_get_context,research_query_history,research_get_budget,knowledge_search,"
-        "knowledge_get,experiment_compare,failure_get_evidence"
-    ),
-    AgentRole.EXPERIMENT_PLANNER: (
-        "research_get_context,research_query_history,research_get_budget,knowledge_search,"
-        "knowledge_get,solver_get_capabilities,policy_compile_intent,experiment_preview"
-    ),
-    AgentRole.EXPERIMENT_EXECUTOR: (
-        "research_get_context,research_get_budget,experiment_preview,experiment_submit,"
-        "experiment_status,experiment_result"
+        "knowledge_get,solver_get_capabilities,experiment_result,experiment_compare,"
+        "failure_get_evidence,policy_compile_intent,experiment_preview"
     ),
     AgentRole.INDEPENDENT_REVIEWER: (
         "research_get_context,research_query_history,research_get_budget,knowledge_search,"
         "knowledge_get,solver_get_capabilities,experiment_result,experiment_compare,"
         "failure_get_evidence,research_get_pareto"
     ),
-    AgentRole.REPORT_WRITER: (
-        "research_get_context,research_query_history,knowledge_search,knowledge_get,"
-        "experiment_result,experiment_compare,research_get_pareto,failure_get_evidence"
-    ),
 }
 
 ROLE_RULES = {
     AgentRole.GUIDE: "Explain concepts and elicit missing requirements. Never create or submit experiments.",
-    AgentRole.HYPOTHESIS: "Propose testable hypotheses and competing explanations grounded in evidence IDs.",
-    AgentRole.EXPERIMENT_PLANNER: "Translate one hypothesis into a scientific intent and preview proposals. Never submit.",
-    AgentRole.EXPERIMENT_EXECUTOR: "Submit only the explicitly reviewed proposal ID. Never compile parameters or call MATLAB.",
+    AgentRole.SCIENTIST: "Propose testable competing hypotheses, compile one bounded scientific intent and preview proposals. Never submit.",
     AgentRole.INDEPENDENT_REVIEWER: "Audit evidence, causal control, budget and safety. Return APPROVE, REVISE or REJECT.",
-    AgentRole.REPORT_WRITER: "Summarize confirmed facts using the report structure. Mark missing values as not calculated.",
 }
 
 
@@ -93,6 +79,13 @@ class SubagentCoordinator:
     def guide(self, research_id: str, text: str) -> dict[str, Any]:
         return self.dispatch(
             research_id, AgentRole.GUIDE.value,
-            "Guide the user from this natural-language request toward confirmed geometry, material, "
-            f"loads, supports, constraints and budget. Request confirmation for AI suggestions: {text}",
+            "Answer only the user's current simple question. Keep the answer concise (at most 350 "
+            "Chinese characters or 220 English words), use no more than two knowledge lookups, and "
+            "do not reopen or reconfirm fields already fixed by the Research Contract. If the request "
+            "actually requires scientific interpretation or an experiment decision, return exactly "
+            f"ESCALATE_TO_LEAD plus one short reason. User question: {text}",
         )
+
+    def scientist(self, research_id: str, objective: str,
+                  evidence_ids: list[str] | None = None) -> dict[str, Any]:
+        return self.dispatch(research_id, AgentRole.SCIENTIST.value, objective, evidence_ids)

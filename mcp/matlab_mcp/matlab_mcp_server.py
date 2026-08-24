@@ -49,8 +49,9 @@ class MatlabMcpWorker:
         if self.data_dir not in job_dir.parents:
             raise MatlabMcpError("MATLAB job path escaped the research data directory")
         job_dir.mkdir(parents=True, exist_ok=True)
-        fidelity = str(task.get("fidelity", "F0")).upper()
-        dimension = 3 if fidelity in {"F2", "F3"} or "3d" in str(task.get("mesh_level", "")).lower() else 2
+        dimension = int(task.get("dimension", 2))
+        if dimension not in {2, 3}:
+            raise MatlabMcpError("Direct MATLAB task dimension must be 2 or 3")
         payload = {"dimension": dimension, "config": self._config(task, dimension),
                    "task_id": task.get("task_id"), "operation": "solve"}
         task_path, result_path = job_dir / "task.json", job_dir / "raw_result.json"
@@ -95,15 +96,17 @@ class MatlabMcpWorker:
         if isinstance(geometry, dict) and geometry.get("mask") is not None:
             config["domain_mask"] = geometry["mask"]
         if dimension == 3:
-            grid = params.get("grid3d") or ([12, 4, 3] if task.get("mesh_level") == "coarse3d"
-                                             else [18, 6, 4])
+            grid = params.get("grid3d") or (task.get("solver_profile") or {}).get("grid")
+            if not grid:
+                raise MatlabMcpError("Direct 3D MATLAB task is missing a Policy solver grid")
             config.update({"nelx": int(grid[0]), "nely": int(grid[1]), "nelz": int(grid[2]),
-                           "accuracy": "standard" if task.get("mesh_level") == "coarse3d" else "high",
+                           "accuracy": str((task.get("solver_profile") or {}).get("accuracy", "standard")),
                            "penal_start": 1.0, "auto_boundary_solid": False})
         else:
-            from solver.params import normalize_task
-            spec = normalize_task(task)
-            config.update({"nelx": int(spec["nelx"]), "nely": int(spec["nely"])})
+            grid = params.get("grid2d") or (task.get("solver_profile") or {}).get("grid")
+            if not grid:
+                raise MatlabMcpError("Direct 2D MATLAB task is missing a Policy solver grid")
+            config.update({"nelx": int(grid[0]), "nely": int(grid[1])})
         if "domain_mask" in config:
             mask_shape = np.asarray(config["domain_mask"]).shape
             if dimension == 2 and len(mask_shape) == 2:
@@ -165,7 +168,7 @@ class MatlabMcpWorker:
         health["last_runs"] = list(self._run_stats[-5:])
         return health
 
-    def warmup(self) -> dict[str, Any]:
+    def warmup(self, *, probe_timeout: float = 120) -> dict[str, Any]:
         """Cold-start the MCP process and MATLAB session, then probe capabilities.
 
         Warmup deliberately runs only the capabilities probe — it never executes a
@@ -176,7 +179,7 @@ class MatlabMcpWorker:
             self.connector.start()
             cold_start_ms = round((time.monotonic() - started_at) * 1000)
             probe_started = time.monotonic()
-            capabilities = self.capabilities(probe=True)
+            capabilities = self.capabilities(probe=True, timeout=probe_timeout)
             probe_ms = round((time.monotonic() - probe_started) * 1000)
             self._warmup = {
                 "cold_start_ms": cold_start_ms,
@@ -187,7 +190,8 @@ class MatlabMcpWorker:
             }
             return dict(self._warmup)
 
-    def capabilities(self, *, probe: bool = False) -> dict[str, Any]:
+    def capabilities(self, *, probe: bool = False,
+                     timeout: float | None = None) -> dict[str, Any]:
         if probe:
             job_dir = (self.data_dir / "_system" / "matlab_capabilities").resolve()
             job_dir.mkdir(parents=True, exist_ok=True)
@@ -195,7 +199,7 @@ class MatlabMcpWorker:
             payload = {"operation": "capabilities", "dimension": 2,
                        "config": {"volfrac": .4, "rmin": 1.5, "penal": 3.0}}
             task_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-            raw = self.gateway.run_topopt_task(task_path, result_path)
+            raw = self.gateway.run_topopt_task(task_path, result_path, timeout=timeout)
             if isinstance(raw.get("capabilities"), dict):
                 self._capability_cache.update(raw["capabilities"])
                 self._capability_cache["probed"] = True
@@ -244,9 +248,15 @@ class MatlabMcpWorker:
             return {**health, "capabilities": self.capabilities(probe=False)}
 
     def configure(self, *, matlab_root: str | Path | None = None,
-                  timeout: float | None = None) -> dict[str, Any]:
+                  timeout: float | None = None, start: bool = True) -> dict[str, Any]:
         with self._lock:
-            return self.connector.configure(matlab_root=matlab_root, timeout=timeout)
+            return self.connector.configure(matlab_root=matlab_root, timeout=timeout,
+                                            start=start)
+
+    def start(self) -> dict[str, Any]:
+        with self._lock:
+            self.connector.start()
+            return self.connector.health()
 
     def close(self) -> None:
         self.connector.stop()
