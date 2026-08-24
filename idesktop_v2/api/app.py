@@ -1,4 +1,4 @@
-"""Compose TopOptPilot research routes with iDeskTop v2 engineering routes."""
+"""Compose TopOptPilot deep-optimization and quick-implementation routes."""
 
 from contextlib import asynccontextmanager
 
@@ -23,7 +23,7 @@ async def _idesktop_lifespan(application):
 
 app.router.lifespan_context = _idesktop_lifespan
 
-app.title = "iDeskTop v2 Sidecar API"
+app.title = "TopOptPilot Sidecar API"
 app.version = __version__
 app.description = "Unified engineering and policy-controlled research desktop API."
 app.include_router(engineering_router)
