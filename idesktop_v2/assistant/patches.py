@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from collections.abc import Callable
 from pathlib import PurePosixPath
@@ -44,6 +45,15 @@ class PatchProposalResponse(BaseModel):
     projectId: str
     baseDigest: str
     files: list[PatchFileResponse]
+
+
+class EngineeringGenerateRequest(BaseModel):
+    instruction: str = Field(min_length=1, max_length=4_000)
+
+
+class EngineeringGenerateResponse(BaseModel):
+    generatedEntrypoint: str = Field(pattern=r"^[A-Za-z][A-Za-z0-9_]{0,79}$")
+    generatedFiles: dict[str, str]
 
 
 def _extract_diff(content: str, relative_path: str) -> str:
@@ -109,3 +119,30 @@ def generate_patch_proposal(
             unifiedDiff=diff,
         )],
     )
+
+
+def generate_quick_source(
+    request: EngineeringGenerateRequest,
+    chat: Callable[[list[dict[str, Any]]], dict[str, Any]],
+) -> EngineeringGenerateResponse:
+    response = chat([
+        {"role": "system", "content": (
+            "Generate a self-contained MATLAB quick-run entrypoint. Return JSON only: "
+            "{\"generatedEntrypoint\":\"name\",\"generatedFiles\":{\"name.m\":\"...\"}}. "
+            "The entrypoint signature is function name(configPath, outputDir). It must write "
+            "status.json and result_summary.json inside outputDir. Do not use network, system, "
+            "MEX, absolute paths, shell commands, or run_topopt_job as a filename."
+        )},
+        {"role": "user", "content": request.instruction},
+    ])
+    if not response.get("success"):
+        raise RuntimeError(str(response.get("error") or "Agent did not generate MATLAB source"))
+    raw = str(response.get("content") or "").strip()
+    fenced = re.fullmatch(r"```(?:json)?\s*\n([\s\S]*?)\n```", raw, re.IGNORECASE)
+    if fenced:
+        raw = fenced.group(1)
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError("assistant response is not valid generated-source JSON") from exc
+    return EngineeringGenerateResponse.model_validate(payload)

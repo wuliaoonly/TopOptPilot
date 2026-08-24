@@ -59,10 +59,11 @@ def build_engineering_matlab_config(task: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def build_matlab_batch_expression(config_path: Path, output_dir: Path) -> str:
+def build_matlab_batch_expression(config_path: Path, output_dir: Path,
+                                  entrypoint: str = "run_topopt_job") -> str:
     config = _matlab_quote(config_path)
     output = _matlab_quote(output_dir)
-    return f"run_topopt_job('{config}','{output}');"
+    return f"{entrypoint}('{config}','{output}');"
 
 
 def build_runtime_command(executable: Path, config_path: Path, output_dir: Path) -> list[str]:
@@ -186,6 +187,8 @@ def run_matlab_batch(
     output_dir: Path,
     *,
     source_root: Path,
+    source_overlay: Path | None = None,
+    entrypoint: str = "run_topopt_job",
     cancel=None,
     timeout_seconds: float | None = None,
     progress: Callable[[int, dict[str, Any]], None] | None = None,
@@ -202,8 +205,11 @@ def run_matlab_batch(
     output_dir.mkdir(parents=True, exist_ok=True)
     config_path = output_dir / "config.json"
     config_path.write_text(json.dumps(build_engineering_matlab_config(task), ensure_ascii=False, indent=2), encoding="utf-8")
-    expression = build_matlab_batch_expression(config_path, output_dir)
-    command = [str(executable), "-wait", "-batch", f"addpath('{_matlab_quote(source_root)}'); {expression}"]
+    expression = build_matlab_batch_expression(config_path, output_dir, entrypoint)
+    paths = f"addpath('{_matlab_quote(source_root)}');"
+    if source_overlay is not None:
+        paths += f" addpath('{_matlab_quote(source_overlay)}');"
+    command = [str(executable), "-wait", "-batch", f"{paths} {expression}"]
     started = time.monotonic()
     process = subprocess.Popen(command, cwd=output_dir, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     output_queue: queue.Queue[str | None] = queue.Queue()

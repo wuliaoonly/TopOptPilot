@@ -167,7 +167,9 @@ def test_silent_runtime_process_observes_timeout_without_blocking_on_stdout(tmp_
             timeout_seconds=0.1,
             parent_env=os.environ,
         )
-    assert time.monotonic() - started < 0.8
+    # Windows taskkill may take roughly one second while still terminating the
+    # silent child well before its natural 1.5 second exit.
+    assert time.monotonic() - started < 1.3
 
 
 def test_solver_is_staged_and_verified_before_execution(tmp_path: Path) -> None:

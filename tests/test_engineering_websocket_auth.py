@@ -10,7 +10,7 @@ from idesktop_v2.api.app import app
 from idesktop_v2.engineering.runs import RunCreateRequest, manager
 
 
-def test_engineering_stream_requires_the_desktop_token(monkeypatch, tmp_path) -> None:
+def test_engineering_stream_requires_a_single_use_ticket(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("IDESKTOP_V2_DATA_DIR", str(tmp_path))
     monkeypatch.setenv("TOPPILOT_DESKTOP_TOKEN", "desktop-secret")
     record = manager.submit(
@@ -40,7 +40,19 @@ def test_engineering_stream_requires_the_desktop_token(monkeypatch, tmp_path) ->
             pass
     assert denied.value.code == 4401
 
+    ticket_response = client.post(
+        f"/api/engineering/runs/{record.run_id}/stream-ticket",
+        headers={"x-topoptpilot-token": "desktop-secret"},
+    )
+    assert ticket_response.status_code == 200
+    ticket = ticket_response.json()["ticket"]
     with client.websocket_connect(
-        f"/api/engineering/runs/{record.run_id}/stream?token=desktop-secret"
+        f"/api/engineering/runs/{record.run_id}/stream?ticket={ticket}"
     ) as websocket:
         assert websocket.receive_json()["type"] in {"queued", "status", "progress", "completed"}
+    with pytest.raises(WebSocketDisconnect) as reused:
+        with client.websocket_connect(
+            f"/api/engineering/runs/{record.run_id}/stream?ticket={ticket}"
+        ):
+            pass
+    assert reused.value.code == 4401

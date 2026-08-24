@@ -9,8 +9,11 @@ from fastapi import APIRouter, HTTPException
 from agent.llm.client import PiAgentClient
 from idesktop_v2.assistant.patches import (
     EngineeringPatchRequest,
+    EngineeringGenerateRequest,
+    EngineeringGenerateResponse,
     PatchProposalResponse,
     generate_patch_proposal,
+    generate_quick_source,
 )
 from topoptpilot.api.fastapi_app import service
 
@@ -35,6 +38,16 @@ def engineering_patch(request: EngineeringPatchRequest) -> PatchProposalResponse
         return generate_patch_proposal(request, _model_chat)
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@router.post("/generate", response_model=EngineeringGenerateResponse)
+def engineering_generate(request: EngineeringGenerateRequest) -> EngineeringGenerateResponse:
+    try:
+        return generate_quick_source(request, _model_chat)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except RuntimeError as exc:

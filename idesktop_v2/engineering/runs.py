@@ -11,6 +11,8 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
+from pathlib import PurePosixPath
+import re
 from typing import Any
 
 import numpy as np
@@ -46,6 +48,8 @@ class RunCreateRequest(BaseModel):
     task: dict[str, Any] = Field(default_factory=dict)
     max_iter: int | None = Field(default=None, ge=1, le=2000)
     time_limit: float | None = Field(default=None, ge=0.1, le=86400)
+    generated_files: dict[str, str] = Field(default_factory=dict)
+    generated_entrypoint: str | None = None
 
     @model_validator(mode="before")
     @classmethod
@@ -56,6 +60,8 @@ class RunCreateRequest(BaseModel):
             value.setdefault("max_iter", value.pop("maxIter", None))
             value.setdefault("time_limit", value.pop("timeLimit", None))
             value.setdefault("runtime_profile_id", value.pop("runtimeProfileId", None))
+            value.setdefault("generated_files", value.pop("generatedFiles", {}))
+            value.setdefault("generated_entrypoint", value.pop("generatedEntrypoint", None))
         return value
 
     @model_validator(mode="after")
@@ -65,6 +71,25 @@ class RunCreateRequest(BaseModel):
                 "runtimeProfileId 只能用于 compiled-runtime lane"
             )
 
+        if self.generated_files:
+            if self.lane is not SolverLane.LOCAL_MATLAB:
+                raise ValueError("generatedFiles 只能用于 local-matlab 快速沙箱")
+            if not self.generated_entrypoint:
+                raise ValueError("generatedFiles requires generatedEntrypoint")
+            if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,79}", self.generated_entrypoint):
+                raise ValueError("generatedEntrypoint must be a MATLAB identifier")
+            if sum(len(value.encode("utf-8")) for value in self.generated_files.values()) > 500_000:
+                raise ValueError("generatedFiles exceeds the 500 KB sandbox limit")
+            reserved = {"run_topopt_job.m", "idesktop_terminal_bridge.m"}
+            for raw in self.generated_files:
+                path = PurePosixPath(raw.replace("\\", "/"))
+                if (path.is_absolute() or ".." in path.parts or path.suffix.lower() not in
+                        {".m", ".json", ".md", ".txt"} or path.name.lower() in reserved):
+                    raise ValueError("generated file path is outside the quick sandbox contract")
+            if f"{self.generated_entrypoint}.m" not in self.generated_files:
+                raise ValueError("generatedEntrypoint must name a generated MATLAB file")
+        elif self.generated_entrypoint:
+            raise ValueError("generatedEntrypoint requires generatedFiles")
         return self
 
 @dataclass
@@ -113,10 +138,23 @@ class RunManager:
         task = json.loads(json.dumps(request.task, ensure_ascii=False))
         if request.max_iter is not None:
             task.setdefault("params", {})["max_iter"] = request.max_iter
-        canonical = json.dumps({"lane": request.lane.value, "ownerId": request.owner_id, "runtimeProfileId": request.runtime_profile_id, "task": task}, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        canonical = json.dumps({"lane": request.lane.value, "ownerId": request.owner_id,
+                                "runtimeProfileId": request.runtime_profile_id, "task": task,
+                                "generatedFiles": request.generated_files,
+                                "generatedEntrypoint": request.generated_entrypoint},
+                               ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         run_id = f"eng-{uuid.uuid4().hex}"
         run_dir = _data_root() / run_id
         run_dir.mkdir(parents=True, exist_ok=False)
+        if request.generated_files:
+            source_dir = run_dir / "source"
+            for relative, content in request.generated_files.items():
+                target = (source_dir / Path(*PurePosixPath(relative).parts)).resolve()
+                if source_dir.resolve() not in target.parents:
+                    raise ValueError("generated file escaped the quick sandbox")
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(content, encoding="utf-8")
+            task["_generated_entrypoint"] = request.generated_entrypoint
         record = _Run(run_id, request.owner_id, request.lane, task, hashlib.sha256(canonical.encode("utf-8")).hexdigest(), run_dir, runtime_profile_id=request.runtime_profile_id)
         with self._lock:
             self._runs[run_id] = record
@@ -281,7 +319,13 @@ class RunManager:
             probe = asyncio.run(probe_matlab_installation(installations[0]))
             if not probe.usable:
                 raise MatlabInfrastructureError(f"MATLAB 探针失败：{probe.diagnostic}")
-            summary = run_matlab_batch(installations[0].executable, record.task, record.run_dir, source_root=source_root, cancel=record.cancel_event.is_set, timeout_seconds=time_limit, progress=progress)
+            overlay = record.run_dir / "source"
+            summary = run_matlab_batch(
+                installations[0].executable, record.task, record.run_dir,
+                source_root=source_root,
+                source_overlay=overlay if overlay.is_dir() else None,
+                entrypoint=str(record.task.get("_generated_entrypoint") or "run_topopt_job"),
+                cancel=record.cancel_event.is_set, timeout_seconds=time_limit, progress=progress)
         elif record.lane is SolverLane.COMPILED_RUNTIME:
             try:
                 profile = runtime_profiles.resolve(record.runtime_profile_id or "")

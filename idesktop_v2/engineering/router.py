@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import os
 import platform
 import sys
 from typing import Literal
@@ -21,6 +20,7 @@ from idesktop_v2.engineering.runtime_profiles import RuntimeProfileError, runtim
 from idesktop_v2.engineering.runtime_discovery import runtime_inventory
 from idesktop_v2.engineering.environment_discovery import matlab_inventory
 from idesktop_v2.artifacts.models import RunStatus
+from topoptpilot.api.ws_tickets import broker as ws_ticket_broker
 from idesktop_v2.engineering.matlab import (
     MatlabInstallation,
     classify_runtime_root,
@@ -218,10 +218,16 @@ def engineering_run_report(run_id: str) -> dict[str, object]:
     return ref.model_dump(by_alias=True, mode="json")
 
 
+@router.post("/runs/{run_id}/stream-ticket")
+def engineering_run_stream_ticket(run_id: str) -> dict[str, object]:
+    _record_or_404(run_id)
+    return ws_ticket_broker.issue("engineering_run", run_id)
+
+
 @router.websocket("/runs/{run_id}/stream")
 async def engineering_run_stream(websocket: WebSocket, run_id: str) -> None:
-    expected = os.environ.get("TOPPILOT_DESKTOP_TOKEN")
-    if expected and websocket.query_params.get("token") != expected:
+    ticket = websocket.query_params.get("ticket", "")
+    if not ws_ticket_broker.consume(ticket, "engineering_run", run_id):
         await websocket.close(code=4401)
         return
     record = manager.get(run_id)
