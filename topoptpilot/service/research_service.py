@@ -431,7 +431,7 @@ class ResearchService:
 
     def submit_proposal(self, research_id: str, proposal_id: str) -> dict[str, Any]:
         """Atomically validate and submit one deterministic-policy proposal."""
-        research = self._require_research(research_id)
+        research = self._require_active_research(research_id)
         proposal = self.store.get_proposal(proposal_id)
         if not proposal or proposal["research_id"] != research_id:
             raise KeyError(f"Proposal {proposal_id} does not exist")
@@ -515,7 +515,7 @@ class ResearchService:
 
     def start_autonomous_research(self, research_id: str) -> dict[str, Any]:
         """Start the Pi-owned closed loop; Policy remains the sole parameter compiler."""
-        research = self._require_research(research_id)
+        research = self._require_active_research(research_id)
         self.store.update_research(research_id, mode="AUTONOMOUS", status="RUNNING")
         self.store.append_event(research_id, EventKind.SYSTEM.value, "ROUND_STARTED",
                                 f"Autonomous round {int(research.get('current_round', 0)) + 1} started.")
@@ -608,14 +608,40 @@ class ResearchService:
         return None
 
     def _next_research_id(self) -> str:
-        used = {item["id"] for item in self.store.list_research()}
+        used = {item["id"] for item in [*self.store.list_research(), *self.store.list_research(archived=True)]}
         number = 1
         while f"MBB-{number:03d}" in used:
             number += 1
         return f"MBB-{number:03d}"
 
-    def list_research(self) -> list[dict[str, Any]]:
-        return self.store.list_research()
+    def list_research(self, archived: bool = False) -> list[dict[str, Any]]:
+        return self.store.list_research(archived=archived)
+
+    def archive_research(self, research_id: str) -> dict[str, Any]:
+        research = self._require_research(research_id)
+        if research.get("archived_at"):
+            return research
+        active_experiments = [item["id"] for item in self.store.list_experiments(research_id)
+                              if str(item.get("status", "")).upper() in {"WAITING", "QUEUED", "RUNNING"}]
+        pending_decisions = [item["id"] for item in self.store.list_decisions(research_id)
+                             if str(item.get("status", "")).upper() == "PENDING"]
+        active_tasks = [item["id"] for item in self.store.list_subagent_tasks(research_id)
+                        if str(item.get("status", "")).upper() in {"QUEUED", "RUNNING"}]
+        if str(research.get("status", "")).upper() == "RUNNING" or active_experiments or pending_decisions or active_tasks:
+            raise ValueError("Research 仍有运行任务、最终审阅或待审批事项，请先处理后再移入回收站")
+        if self.pi_runtime is not None:
+            self.pi_runtime.release(research_id)
+        archived = self.store.update_research(research_id, archived_at=utc_now())
+        self.store.append_event(research_id, EventKind.SYSTEM.value, "RESEARCH_ARCHIVED", "Research moved to recycle bin.")
+        return archived
+
+    def restore_research(self, research_id: str) -> dict[str, Any]:
+        research = self._require_research(research_id)
+        if not research.get("archived_at"):
+            return research
+        restored = self.store.update_research(research_id, archived_at=None)
+        self.store.append_event(research_id, EventKind.SYSTEM.value, "RESEARCH_RESTORED", "Research restored from recycle bin.")
+        return restored
 
     def get_research(self, research_id: str) -> dict[str, Any]:
         research = self.store.get_research(research_id)
@@ -640,7 +666,7 @@ class ResearchService:
 
     def create_experiment(self, research_id: str,
                           request: ExperimentCreate | dict[str, Any]) -> dict[str, Any]:
-        research = self._require_research(research_id)
+        research = self._require_active_research(research_id)
         if research["budget_used"] >= research["budget_total"]:
             raise ValueError("Research budget is exhausted")
         if isinstance(request, ExperimentCreate):
@@ -753,7 +779,7 @@ class ResearchService:
     def run_experiment(self, experiment_id: str) -> dict[str, Any]:
         with self._experiment_lock(experiment_id):
             experiment = self.get_experiment(experiment_id)
-            research = self._require_research(experiment["research_id"])
+            research = self._require_active_research(experiment["research_id"])
             self._require_approved_run_decision(experiment)
             if research["status"] in {"PAUSED", "STOPPED"}:
                 raise ValueError(f"Research is {research['status'].lower()}")
@@ -1039,6 +1065,7 @@ class ResearchService:
 
     def approve_decision(self, decision_id: str) -> dict[str, Any]:
         decision = self._require_decision(decision_id)
+        self._require_active_research(decision["research_id"])
         experiment_id = decision.get("experiment_id")
         lock = self._experiment_lock(experiment_id) if experiment_id else self._completion_lock
         with lock:
@@ -1059,6 +1086,7 @@ class ResearchService:
 
     def edit_pending_experiment(self, experiment_id: str, parameters: dict[str, Any]) -> dict[str, Any]:
         experiment = self.get_experiment(experiment_id)
+        self._require_active_research(experiment["research_id"])
         decision = next((item for item in self.store.list_decisions(experiment["research_id"])
                          if item.get("experiment_id") == experiment_id and item["status"] == "PENDING"), None)
         if not decision:
@@ -1081,6 +1109,7 @@ class ResearchService:
 
     def reject_decision(self, decision_id: str) -> dict[str, Any]:
         decision = self._require_decision(decision_id)
+        self._require_active_research(decision["research_id"])
         experiment_id = decision.get("experiment_id")
         lock = self._experiment_lock(experiment_id) if experiment_id else self._completion_lock
         with lock:
@@ -1105,7 +1134,7 @@ class ResearchService:
         text = text.strip()
         if not text:
             return WorkspaceCommandResult(ok=False, message="Command is empty")
-        self._require_research(research_id)
+        self._require_active_research(research_id)
         if not text.startswith("/"):
             self.store.append_event(research_id, EventKind.USER.value, "USER", text)
             self.store.update_research(research_id, current_question=text)
@@ -1343,7 +1372,7 @@ class ResearchService:
         return values
 
     def guide_research(self, research_id: str, text: str) -> dict[str, Any]:
-        self._require_research(research_id)
+        self._require_active_research(research_id)
         if not self.pi_runtime:
             entries = self.knowledge.search(text, self._require_research(research_id).get("locale", "zh-CN"), limit=5)
             return {"status": "KNOWLEDGE_ONLY", "task": None, "knowledge": entries,
@@ -1557,6 +1586,12 @@ class ResearchService:
         research = self.store.get_research(research_id)
         if not research:
             raise KeyError(f"Research {research_id} does not exist")
+        return research
+
+    def _require_active_research(self, research_id: str) -> dict[str, Any]:
+        research = self._require_research(research_id)
+        if research.get("archived_at"):
+            raise ValueError("RESEARCH_ARCHIVED: restore the Research before modifying it")
         return research
 
     def _require_decision(self, decision_id: str) -> dict[str, Any]:

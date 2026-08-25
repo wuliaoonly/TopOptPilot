@@ -14,6 +14,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 
 from topoptpilot.schemas import ExperimentCreate, ResearchCreate, ToolRequest
+from topoptpilot.schemas.api_contracts import ResearchArchiveResult
 from topoptpilot.api.ws_tickets import broker as ws_ticket_broker
 from topoptpilot.service import ResearchService
 from mcp.matlab_mcp import MatlabMcpError
@@ -40,6 +41,12 @@ def _api_error(code: str, message: str, *, source: str = "API",
                retryable: bool = False, detail: dict | None = None) -> dict:
     return {"code": code, "message": message, "source": source,
             "retryable": retryable, "detail": detail or {}}
+
+
+def _research_write_conflict(exc: ValueError) -> HTTPException:
+    message = str(exc)
+    code = "RESEARCH_ARCHIVED" if message.startswith("RESEARCH_ARCHIVED:") else "RESEARCH_CONFLICT"
+    return HTTPException(status_code=409, detail=_api_error(code, message))
 
 
 @app.exception_handler(HTTPException)
@@ -125,8 +132,32 @@ def create_research(request: dict):
 
 
 @app.get("/api/research")
-def list_research():
-    return service.list_research()
+def list_research(archived: bool = False):
+    return service.list_research(archived=archived)
+
+
+@app.delete("/api/research/{research_id}", response_model=ResearchArchiveResult)
+def archive_research(research_id: str, confirm: bool = False):
+    if not confirm:
+        raise HTTPException(status_code=400, detail=_api_error(
+            "ARCHIVE_CONFIRMATION_REQUIRED", "归档前必须显式确认"))
+    try:
+        return {"research": service.archive_research(research_id), "archived": True}
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=_api_error(
+            "RESEARCH_NOT_FOUND", str(exc))) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=_api_error(
+            "RESEARCH_ARCHIVE_BLOCKED", str(exc))) from exc
+
+
+@app.post("/api/research/{research_id}/restore", response_model=ResearchArchiveResult)
+def restore_research(research_id: str):
+    try:
+        return {"research": service.restore_research(research_id), "archived": False}
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=_api_error(
+            "RESEARCH_NOT_FOUND", str(exc))) from exc
 
 
 @app.post("/api/research/{research_id}/autonomous")
@@ -135,6 +166,8 @@ def start_autonomous(research_id: str):
         return service.start_autonomous_research(research_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise _research_write_conflict(exc) from exc
 
 
 @app.get("/api/research/{research_id}/events")
@@ -223,6 +256,8 @@ def guide_research(research_id: str, request: GuideRequest):
         return service.guide_research(research_id, request.text)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise _research_write_conflict(exc) from exc
 
 
 @app.post("/api/guide")
@@ -282,13 +317,18 @@ def execute_command(research_id: str, request: CommandRequest):
         return service.execute_command(research_id, request.text, request.selected_experiment)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise _research_write_conflict(exc) from exc
 
 
 @app.patch("/api/research/{research_id}/locale")
 def set_locale(research_id: str, request: LocaleRequest):
     if request.locale not in {"zh-CN", "en-US"}:
         raise HTTPException(status_code=422, detail="locale must be zh-CN or en-US")
-    service._require_research(research_id)
+    try:
+        service._require_active_research(research_id)
+    except ValueError as exc:
+        raise _research_write_conflict(exc) from exc
     return service.store.update_research(research_id, locale=request.locale)
 
 
@@ -299,7 +339,7 @@ def create_experiment(research_id: str, request: ExperimentCreate):
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+        raise _research_write_conflict(exc) from exc
 
 
 @app.post("/api/experiments", status_code=201)
@@ -321,6 +361,8 @@ def approve_decision(decision_id: str):
         return service.approve_decision(decision_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise _research_write_conflict(exc) from exc
 
 
 @app.post("/api/decision/{decision_id}/reject")
@@ -329,6 +371,8 @@ def reject_decision(decision_id: str):
         return service.reject_decision(decision_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise _research_write_conflict(exc) from exc
 
 
 @app.post("/api/decision/{decision_id}/edit")
@@ -341,7 +385,7 @@ def edit_decision(decision_id: str, request: DecisionEditRequest):
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+        raise _research_write_conflict(exc) from exc
 
 
 @app.get("/api/decision/{decision_id}/why")

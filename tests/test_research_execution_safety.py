@@ -172,3 +172,53 @@ def test_decision_resolution_is_compare_and_swap(service: ResearchService) -> No
     assert service.store.resolve_decision_if_pending(decision_id, "REJECTED") is True
     assert service.store.resolve_decision_if_pending(decision_id, "APPROVED") is False
     assert service.store.get_decision(decision_id)["status"] == "REJECTED"
+
+
+def test_research_archive_is_reversible_and_filtered(service: ResearchService) -> None:
+    archived = research(service)
+    active = research(service)
+
+    result = service.archive_research(archived["id"])
+
+    assert result["archived_at"]
+    assert {item["id"] for item in service.list_research()} == {active["id"]}
+    assert {item["id"] for item in service.list_research(archived=True)} == {archived["id"]}
+    assert service.get_research(archived["id"])["id"] == archived["id"]
+
+    restored = service.restore_research(archived["id"])
+
+    assert restored["archived_at"] is None
+    assert {item["id"] for item in service.list_research()} == {archived["id"], active["id"]}
+    assert service.list_research(archived=True) == []
+
+
+def test_research_archive_blocks_pending_work(service: ResearchService) -> None:
+    item = research(service)
+    pending_direct(service, item["id"])
+
+    with pytest.raises(ValueError, match="运行任务|待审批"):
+        service.archive_research(item["id"])
+
+    assert service.get_research(item["id"])["archived_at"] is None
+
+
+def test_archived_research_is_readable_but_rejects_mutations(service: ResearchService) -> None:
+    item = research(service)
+    service.archive_research(item["id"])
+
+    assert service.get_research(item["id"])["id"] == item["id"]
+    with pytest.raises(ValueError, match="RESEARCH_ARCHIVED"):
+        service.execute_command(item["id"], "continue")
+    with pytest.raises(ValueError, match="RESEARCH_ARCHIVED"):
+        service.start_autonomous_research(item["id"])
+    with pytest.raises(ValueError, match="RESEARCH_ARCHIVED"):
+        service.create_experiment(item["id"], ExperimentCreate())
+
+
+def test_archived_research_id_is_never_reused(service: ResearchService) -> None:
+    first = research(service)
+    service.archive_research(first["id"])
+
+    second = research(service)
+
+    assert second["id"] != first["id"]

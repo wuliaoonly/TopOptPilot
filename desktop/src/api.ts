@@ -81,7 +81,9 @@ export const api = {
   engineeringChat: (data: EngineeringChatRequest) => request<EngineeringChatResponse>("/api/engineering/assistant/chat", { method: "POST", body: JSON.stringify(data) }),
   engineeringGenerate: (instruction: string) => request<{generatedEntrypoint:string;generatedFiles:Record<string,string>}>("/api/engineering/assistant/generate", { method: "POST", body: JSON.stringify({ instruction }) }),
   health: () => request<SystemHealth>("/api/health"),
-  listResearch: () => request<Research[]>("/api/research"),
+  listResearch: (archived = false) => request<Research[]>(`/api/research?archived=${archived ? "true" : "false"}`),
+  archiveResearch: (id: string) => request<import("./generated/api-contract").ResearchArchiveResult<Research>>(`/api/research/${encodeURIComponent(id)}?confirm=true`, { method: "DELETE" }),
+  restoreResearch: (id: string) => request<import("./generated/api-contract").ResearchArchiveResult<Research>>(`/api/research/${encodeURIComponent(id)}/restore`, { method: "POST" }),
   getResearch: (id: string) => request<Research>(`/api/research/${id}`),
   researchArtifacts: (id: string) => request<{researchId:string; experiments:Array<{experimentId:string; status:string; dimension:number; solverProfile:Record<string,unknown>; legacyFidelity?:string; backend:string; provenance:Record<string,string>; files:Array<{relativePath:string; sha256:string; mediaType:string; sizeBytes:number}>; metrics:Record<string,number|null>}>}>(`/api/research/${id}/artifacts`),
   researchPareto: (id: string) => request<Array<Record<string,unknown>>>(`/api/research/${id}/pareto`),
@@ -187,6 +189,7 @@ export const quickApi = {
 
 export const deepApi = {
   list: api.listResearch, get: api.getResearch, create: api.createResearch,
+  archive: api.archiveResearch, restore: api.restoreResearch,
   promote: api.researchFromEngineeringRun, artifacts: api.researchArtifacts,
   compare: api.researchCompare, pareto: api.researchPareto,
   autonomous: api.autonomous, command: api.command, guide: api.guide,

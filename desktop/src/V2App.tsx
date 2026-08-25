@@ -87,9 +87,27 @@ export default function V2App() {
     try { action === "approve" ? await api.approve(id) : await api.reject(id); if (selectedResearch) await refreshSelected(selectedResearch.id); }
     catch (reason) { reportError(String(reason)); }
   }
+  async function archiveResearch(id: string) {
+    try {
+      await api.archiveResearch(id);
+      const remaining = researches.filter(item => item.id !== id);
+      setResearches(remaining);
+      if (selectedResearch?.id === id) {
+        setSelectedResearch(remaining[0] || null);
+        setSelectedExperiment(null);
+      }
+    } catch (reason) { reportError(String(reason)); }
+  }
+  async function restoreResearch(id: string) {
+    try {
+      const result = await api.restoreResearch(id);
+      const restored = result.research;
+      setResearches(items => [restored, ...items.filter(item => item.id !== restored.id)]);
+    } catch (reason) { reportError(String(reason)); }
+  }
   const workspace = useMemo(() => mode === "engineering"
     ? <EngineeringWorkspace health={health} onError={reportError} onResearchBaseline={createResearchFromRun} researches={researches} selectedResearch={selectedResearch} onCreateResearch={createResearch} onSelectResearch={refreshSelected}/>
-    : <ResearchWorkspace researches={researches} selected={selectedResearch} active={active} command={command} busy={busy} safeMode={safeMode} onCommand={runResearchCommand} onCreateResearch={createResearch} onDecision={decide} onError={reportError} onSelect={refreshSelected} onSelectExperiment={setSelectedExperiment} setCommand={setCommand}/>,
+    : <ResearchWorkspace researches={researches} selected={selectedResearch} active={active} command={command} busy={busy} safeMode={safeMode} onCommand={runResearchCommand} onCreateResearch={createResearch} onArchive={archiveResearch} onRestore={restoreResearch} onDecision={decide} onError={reportError} onSelect={refreshSelected} onSelectExperiment={setSelectedExperiment} setCommand={setCommand}/>,
     [mode, health, reportError, createResearchFromRun, researches, selectedResearch, active, command, busy, safeMode, refreshSelected]);
 
   if (!ready) return <div className="v2-boot"><LoaderCircle className="spin" size={28}/><b>正在启动 TopOptPilot</b><span>{error || "连接统一 sidecar…"}</span></div>;

@@ -25,6 +25,7 @@ class ResearchTools:
 
     def invoke(self, research_id: str, name: str, arguments: dict[str, Any],
                *, source: str = "API", role: str = "RESEARCH_LEAD") -> Any:
+        self.service._require_active_research(research_id)
         if name not in ALLOWED_TOOLS:
             raise PermissionError(f"Tool {name} is not allowed")
         if role != "RESEARCH_LEAD":

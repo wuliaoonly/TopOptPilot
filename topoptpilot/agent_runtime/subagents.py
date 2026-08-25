@@ -45,6 +45,7 @@ class SubagentCoordinator:
 
     def dispatch(self, research_id: str, role: str, objective: str,
                  evidence_ids: list[str] | None = None, proposal_id: str | None = None) -> dict[str, Any]:
+        self.bridge.service._require_active_research(research_id)
         resolved = AgentRole(role)
         if resolved in {AgentRole.RESEARCH_LEAD} or resolved not in ROLE_TOOLS:
             raise ValueError(f"Role {role} cannot be dispatched")
