@@ -15,12 +15,17 @@ from pydantic import BaseModel, Field
 from idesktop_v2 import __version__
 from idesktop_v2.engineering.report import write_report
 from idesktop_v2.engineering.runs import RunCreateRequest, manager
+from idesktop_v2.engineering.comparison_schemes import comparison_schemes
 from idesktop_v2.engineering.terminal import MAX_COMMAND_BYTES, manager as terminal_manager
 from idesktop_v2.engineering.runtime_profiles import RuntimeProfileError, runtime_profiles
 from idesktop_v2.engineering.runtime_discovery import runtime_inventory
 from idesktop_v2.engineering.environment_discovery import matlab_inventory
 from idesktop_v2.artifacts.models import RunStatus
 from topoptpilot.api.ws_tickets import broker as ws_ticket_broker
+from topoptpilot.schemas.api_contracts import (
+    EngineeringComparisonScheme,
+    EngineeringComparisonSchemeCreate,
+)
 from idesktop_v2.engineering.matlab import (
     MatlabInstallation,
     classify_runtime_root,
@@ -215,7 +220,50 @@ def engineering_run_report(run_id: str) -> dict[str, object]:
     ref = manager._ref(record.run_dir, path, "text/markdown")
     if not any(item.relative_path == ref.relative_path for item in record.files):
         record.files.append(ref)
+        manager.persist(record)
     return ref.model_dump(by_alias=True, mode="json")
+
+
+@router.get("/comparison-schemes", response_model=list[EngineeringComparisonScheme])
+def comparison_scheme_list() -> list[dict[str, object]]:
+    return comparison_schemes.list()
+
+
+@router.post("/comparison-schemes", status_code=201, response_model=EngineeringComparisonScheme)
+def comparison_scheme_create(request: EngineeringComparisonSchemeCreate) -> dict[str, object]:
+    try:
+        return comparison_schemes.create(request.run_id, request.name)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail={
+            "code": "ENGINEERING_RUN_NOT_FOUND", "message": "engineering run not found",
+            "source": "API", "retryable": False, "detail": {},
+        }) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail={
+            "code": "COMPARISON_SCHEME_REJECTED", "message": str(exc),
+            "source": "EVALUATOR", "retryable": False, "detail": {},
+        }) from exc
+
+
+@router.get("/comparison-schemes/{scheme_id}", response_model=EngineeringComparisonScheme)
+def comparison_scheme_get(scheme_id: str) -> dict[str, object]:
+    value = comparison_schemes.get(scheme_id)
+    if value is None:
+        raise HTTPException(status_code=404, detail={
+            "code": "COMPARISON_SCHEME_NOT_FOUND", "message": "comparison scheme not found",
+            "source": "API", "retryable": False, "detail": {},
+        })
+    return value
+
+
+@router.delete("/comparison-schemes/{scheme_id}", response_model=dict[str, object])
+def comparison_scheme_delete(scheme_id: str) -> dict[str, object]:
+    if not comparison_schemes.delete(scheme_id):
+        raise HTTPException(status_code=404, detail={
+            "code": "COMPARISON_SCHEME_NOT_FOUND", "message": "comparison scheme not found",
+            "source": "API", "retryable": False, "detail": {},
+        })
+    return {"deleted": True, "id": scheme_id}
 
 
 @router.post("/runs/{run_id}/stream-ticket")

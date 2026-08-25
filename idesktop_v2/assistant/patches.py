@@ -10,6 +10,10 @@ from pathlib import PurePosixPath
 from typing import Any
 
 from pydantic import BaseModel, Field, field_validator
+from topoptpilot.schemas.api_contracts import (
+    EngineeringChatRequest,
+    EngineeringChatResponse,
+)
 
 
 ALLOWED_EXTENSIONS = {".m", ".json", ".md", ".txt", ".log", ".csv"}
@@ -118,6 +122,60 @@ def generate_patch_proposal(
             beforeDigest=request.beforeDigest,
             unifiedDiff=diff,
         )],
+    )
+
+
+def generate_engineering_chat(
+    request: EngineeringChatRequest,
+    chat: Callable[[list[dict[str, Any]]], dict[str, Any]],
+    *,
+    configured: bool,
+) -> EngineeringChatResponse:
+    context = request.context.model_dump(exclude_none=True, by_alias=True)
+    source = context.pop("source", None)
+    selected_text = context.pop("selectedText", "")
+    if selected_text:
+        if not request.allow_external_source:
+            raise PermissionError("explicit consent is required before sending selected source to an external model")
+        source = selected_text if source is None else f"{selected_text}\n{source}"
+    if source is not None and not request.allow_external_source:
+        raise PermissionError("explicit consent is required before sending source to an external model")
+    if source is not None and not request.relative_path:
+        raise ValueError("source requires a selected relative path")
+    if request.relative_path:
+        path = PurePosixPath(request.relative_path.replace("\\", "/"))
+        if path.is_absolute() or not path.parts or any(part in {"", ".", ".."} for part in path.parts):
+            raise ValueError("relativePath must stay inside the controlled project")
+        if path.suffix.lower() not in ALLOWED_EXTENSIONS:
+            raise ValueError("relativePath extension is not allowed")
+    context_payload = json.dumps(context, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    if len(context_payload.encode("utf-8")) > 120_000:
+        raise ValueError("engineering chat context exceeds the controlled size limit")
+    digest = hashlib.sha256(context_payload.encode("utf-8")).hexdigest()
+    if not configured:
+        return EngineeringChatResponse(
+            reply="当前未配置 Agent API Key。你仍可以继续使用本机求解、参数配置和 Safe Mode。",
+            source="not_configured", contextDigest=digest,
+        )
+    user_content = f"工程问题：{request.message}\n工程上下文：{context_payload}"
+    if source is not None:
+        user_content += f'\n<untrusted-source path="{request.relative_path}">\n{source}\n</untrusted-source>'
+    response = chat([
+        {"role": "system", "content": (
+            "你是 TopOptPilot 快速实现工程助手。只回答工程开发、拓扑优化参数、MATLAB/Python 求解、"
+            "结果制品和运行诊断问题。不要修改文件，不要调用终端，不要提交深度实验，不要编造求解结果，"
+            "不要把工程运行自动解释为科研结论。若用户要求改代码，只说明需要进入 Patch Proposal 审批流程。"
+        )},
+        {"role": "user", "content": user_content},
+    ])
+    if not response.get("success"):
+        return EngineeringChatResponse(
+            reply="在线 Agent 当前不可用，已保留本机工程能力。请检查 Agent 设置或继续使用 Safe Mode。",
+            source="safe_mode", contextDigest=digest,
+        )
+    return EngineeringChatResponse(
+        reply=str(response.get("content") or "Agent 未返回文本"),
+        source="qwen", actions=[], contextDigest=digest,
     )
 
 

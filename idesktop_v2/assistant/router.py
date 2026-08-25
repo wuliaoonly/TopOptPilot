@@ -14,7 +14,9 @@ from idesktop_v2.assistant.patches import (
     PatchProposalResponse,
     generate_patch_proposal,
     generate_quick_source,
+    generate_engineering_chat,
 )
+from topoptpilot.schemas.api_contracts import EngineeringChatRequest, EngineeringChatResponse
 from topoptpilot.api.fastapi_app import service
 
 
@@ -24,12 +26,37 @@ router = APIRouter(prefix="/api/engineering/assistant", tags=["engineering-assis
 def _model_chat(messages: list[dict[str, Any]]) -> dict[str, Any]:
     settings = service.get_settings()["agent"]
     client = PiAgentClient(
+        api_key=service.agent_api_key(),
         base_url=settings["base_url"],
         model=settings["model"],
         timeout=settings["timeout_seconds"],
         max_retries=settings["max_retries"],
     )
     return client.chat(messages, temperature=0.1, max_tokens=4096)
+
+
+@router.post("/chat", response_model=EngineeringChatResponse)
+def engineering_chat(request: EngineeringChatRequest) -> EngineeringChatResponse:
+    try:
+        configured = service.get_settings().get("api_key_status") not in {
+            "not_configured", "environment_missing",
+        }
+        return generate_engineering_chat(request, _model_chat, configured=bool(configured))
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail={
+            "code": "ENGINEERING_SOURCE_CONSENT_REQUIRED", "message": str(exc),
+            "source": "AGENT", "retryable": False, "detail": {},
+        }) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail={
+            "code": "ENGINEERING_CHAT_INVALID", "message": str(exc),
+            "source": "AGENT", "retryable": False, "detail": {},
+        }) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail={
+            "code": "ENGINEERING_AGENT_UNAVAILABLE", "message": str(exc),
+            "source": "AGENT", "retryable": True, "detail": {},
+        }) from exc
 
 
 @router.post("/patch", response_model=PatchProposalResponse)

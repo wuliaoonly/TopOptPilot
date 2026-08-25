@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { AppSettings, BackendInfo, EngineeringRun, GeometryPreview, KnowledgeEntry, Locale, MatlabHealth, Research, SettingsDiagnostics, SolverCapabilities, SubagentTask, SystemHealth } from "./types";
+import type { EngineeringChatRequest, EngineeringChatResponse, EngineeringComparisonSchemeCreate } from "./generated/api-contract";
 
 let backend: BackendInfo | null = null;
 
@@ -77,6 +78,7 @@ export const api = {
   patchPreview: (root: string, proposal: import("./types").PatchProposal) => invoke<import("./types").PatchPreviewResult>("patch_preview", { root, proposal }),
   patchApply: (root: string, proposal: import("./types").PatchProposal, approvalToken: string) => invoke<import("./types").ProjectFile[]>("patch_apply", { root, proposal, approvalToken }),
   engineeringPatch: (data: object) => request<import("./types").PatchProposal>("/api/engineering/assistant/patch", { method: "POST", body: JSON.stringify(data) }),
+  engineeringChat: (data: EngineeringChatRequest) => request<EngineeringChatResponse>("/api/engineering/assistant/chat", { method: "POST", body: JSON.stringify(data) }),
   engineeringGenerate: (instruction: string) => request<{generatedEntrypoint:string;generatedFiles:Record<string,string>}>("/api/engineering/assistant/generate", { method: "POST", body: JSON.stringify({ instruction }) }),
   health: () => request<SystemHealth>("/api/health"),
   listResearch: () => request<Research[]>("/api/research"),
@@ -121,6 +123,10 @@ export const api = {
   engineeringCancel: (id: string) => request<EngineeringRun>(`/api/engineering/runs/${id}/cancel`, { method: "POST" }),
   engineeringEvents: (id: string) => request<{runId:string; events:Array<Record<string,unknown>>}>(`/api/engineering/runs/${id}/events`),
   engineeringReport: (id: string) => request<{relativePath:string; sha256:string; mediaType:string; sizeBytes:number}>(`/api/engineering/runs/${id}/report`, { method: "POST" }),
+  engineeringComparisonSchemes: () => request<import("./types").EngineeringComparisonScheme[]>("/api/engineering/comparison-schemes"),
+  engineeringComparisonScheme: (id: string) => request<import("./types").EngineeringComparisonScheme>(`/api/engineering/comparison-schemes/${encodeURIComponent(id)}`),
+  engineeringComparisonSchemeCreate: (data: EngineeringComparisonSchemeCreate) => request<import("./types").EngineeringComparisonScheme>("/api/engineering/comparison-schemes", { method: "POST", body: JSON.stringify(data) }),
+  engineeringComparisonSchemeDelete: (id: string) => request<{deleted:boolean; id:string}>(`/api/engineering/comparison-schemes/${encodeURIComponent(id)}`, { method: "DELETE" }),
   terminalStart: (data: object) => request<{sessionId:string; status:string}>("/api/engineering/terminal/start", { method: "POST", body: JSON.stringify(data) }),
   terminalCommand: (sessionId: string, command: string) => request<{queued:boolean; id:number; command:string}>(`/api/engineering/terminal/command?session_id=${encodeURIComponent(sessionId)}`, { method: "POST", body: JSON.stringify({ command }) }),
   terminalPoll: (sessionId: string) => request<{sessionId:string; status:string; results:Array<Record<string,unknown>>}>(`/api/engineering/terminal/${encodeURIComponent(sessionId)}`),
@@ -170,7 +176,11 @@ export const quickApi = {
   runtimeProbe: api.engineeringRuntimeProbe, bundledRuntime: api.engineeringBundledRuntime,
   run: api.engineeringRun, getRun: api.engineeringRunGet, cancel: api.engineeringCancel,
   events: api.engineeringEvents, report: api.engineeringReport, stream: api.engineeringStream,
-  patch: api.engineeringPatch, generate: api.engineeringGenerate,
+  patch: api.engineeringPatch, generate: api.engineeringGenerate, chat: api.engineeringChat,
+  comparisonSchemes: api.engineeringComparisonSchemes,
+  comparisonScheme: api.engineeringComparisonScheme,
+  createComparisonScheme: api.engineeringComparisonSchemeCreate,
+  deleteComparisonScheme: api.engineeringComparisonSchemeDelete,
   terminalStart: api.terminalStart, terminalCommand: api.terminalCommand,
   terminalPoll: api.terminalPoll, terminalStop: api.terminalStop,
 };
