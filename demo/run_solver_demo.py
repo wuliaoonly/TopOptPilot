@@ -1,5 +1,10 @@
 """
-赛题 B 演示 — "AI 根据实验结果调整下一轮计划，逐步提升实验成效"
+Legacy deterministic Python solver regression, not the V6.3 product demo.
+
+The official V6.3 demonstration uses the Tauri application and is documented
+in ``demo/README.md`` and ``示范案例说明.md``.  This script remains useful for
+offline solver regression only: it does not run the Quick/Deep Agent workflow,
+MATLAB MCP, Evaluator, or Final Reviewer.
 
 真实物理求解版：随机占位模拟已被 `solver/topopt_engine.run_topopt` 取代。
 本脚本用真实拓扑优化引擎（MBB 60×30, volfrac=0.4）复现验证过的物理序列
@@ -278,7 +283,7 @@ def print_density_ascii(result: dict) -> None:
 def main() -> None:
     """演示主流程：求解 → 汇总表 → 审计 → 成效追踪 → 关键结构对比。"""
     print("=" * 74)
-    print("TopOptPilot — 赛题 B 演示：AI 根据实验结果调整下一轮计划，逐步提升实验成效")
+    print("TopOptPilot — legacy deterministic Python solver regression")
     print("（真实拓扑优化引擎 solver/topopt_engine，MBB 60×30，volfrac=0.4）")
     print("=" * 74)
 

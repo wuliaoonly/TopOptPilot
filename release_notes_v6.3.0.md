@@ -1,6 +1,6 @@
-# 🎯 V6.3.0 — 统一工作台与桌面专用发布
+# V6.3.0 候选发布说明 — 统一工作台与桌面专用版本
 
-> **桌面端专用**。V6.3 将"快速实现 / 深度优化"统一到同一个 Tauri 原生工作台：
+> **桌面端专用候选版本**。V6.3 将"快速实现 / 深度优化"统一到同一个 Tauri 原生工作台：
 > 共用左栏项目文件、中央四页签（代码 / 结果 / 迭代 / 参数）与右侧工作流面板，
 > Quick Run 与 Deep Experiment 共用同一套 Workspace、Agent 工作流与制品血缘。
 > 本版本**不再提供** Streamlit 或独立浏览器版入口（`launch.py --web` 已被拒绝）。
@@ -89,5 +89,7 @@ Credential Manager 凭据）完成受控 Deep Research campaign。实际结果�
 ## ⚠️ 发布范围声明
 
 - **桌面端专用**：本版本不提供浏览器/Streamlit 入口
+- **发布状态**：`v6.3.0` 标签已存在，GitHub Release 页面与安装包 asset 已发布
+  （https://github.com/wuliaoonly/TopOptPilot/releases/tag/v6.3.0）
 - **未完成门禁如实声明**：干净 Windows 虚拟机安装/卸载矩阵、代码签名仍需独立环境完成；
   不以其缺失掩盖任何未验证功能

@@ -1,0 +1,25 @@
+{
+  "workspaceId": "REPLACE_WITH_WORKSPACE_ID",
+  "lane": "local-matlab",
+  "ownerId": "v63-demo",
+  "task": {
+    "task_id": "v63-demo-mbb-2d",
+    "dimension": "2d",
+    "load_case": "MBB",
+    "geometry": {
+      "nelx": 12,
+      "nely": 4,
+      "nelz": 1
+    },
+    "params": {
+      "volfrac": 0.4,
+      "penal": 3.0,
+      "rmin": 1.5,
+      "min_iter": 1,
+      "max_iter": 3,
+      "accuracy": "standard",
+      "filter_strategy": "fixed"
+    }
+  },
+  "timeLimit": 180
+}

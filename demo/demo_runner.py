@@ -1,67 +1,142 @@
-"""
-十分钟演示脚本（参照方案 Section 10.2）
+"""Read-only V6.3 demonstration preflight.
 
-demo_runner.py 编排演示流程的9个阶段。
-
-时间线:
-  0:00-0:50   问题与差距
-  0:50-1:40   系统架构
-  1:40-2:40   上传论文与任务
-  2:40-3:40   Paper-to-Plugin
-  3:40-4:40   候选假设竞争
-  4:40-6:10   真实求解
-  6:10-7:20   失败与修正
-  7:20-8:30   第二轮与对比
-  8:30-9:20   独立复核
-  9:20-10:00  研究报告
+This command validates recorded evidence and prints the desktop demonstration
+timeline.  It never runs FEM, calls an online model, or synthesizes a success
+result.  A passing preflight means that the evidence package is present; it is
+not a substitute for the live Tauri/MATLAB demonstration.
 """
 
-import time
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import sys
+from pathlib import Path
+from typing import Any
 
 
-class DemoRunner:
-    """现场演示编排器"""
+ROOT = Path(__file__).resolve().parents[1]
+EXPECTED_VERSION = "6.3.0"
+EXPECTED_INSTALLER_SHA256 = "E0EF7591D48CCCC2F6BE025EE52BF4E6730AE38DE74646707279A39859B33CC0"
 
-    def __init__(self):
-        self.current_step = 0
-        self.total_steps = 9
-        self.timeline = [
-            {"time": "0:00-0:50", "title": "问题与差距",
-             "action": "展示传统方法多、选择难、三维试验成本高"},
-            {"time": "0:50-1:40", "title": "系统架构",
-             "action": "官方Pi/Qwen做科研决策 -> Safety Policy编译意图 -> Python/MATLAB提供物理真值"},
-            {"time": "1:40-2:40", "title": "上传论文与任务",
-             "action": "展示真实PDF、支架几何、边界条件"},
-            {"time": "2:40-3:40", "title": "Paper-to-Plugin",
-             "action": "提取公式、页码、适用条件，生成方法卡片"},
-            {"time": "3:40-4:40", "title": "候选假设竞争",
-             "action": "生成3项候选，审稿Agent指出断连和局部最优风险"},
-            {"time": "4:40-6:10", "title": "真实求解",
-             "action": "任务JSON -> CUDA MEX求解 -> 残差/迭代曲线实时更新"},
-            {"time": "6:10-7:20", "title": "失败与修正",
-             "action": "第一轮过早投影导致断连，Agent回滚并调整控制器"},
-            {"time": "7:20-8:30", "title": "第二轮与对比",
-             "action": "展示结构、灰度、柔度、连通和时间对比表"},
-            {"time": "8:30-9:20", "title": "独立复核",
-             "action": "重建网格 -> 独立FEM -> 位移/应力云图"},
-            {"time": "9:20-10:00", "title": "研究报告",
-             "action": "输出假设等级、适用边界、真实引用、复现包"},
-        ]
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
 
-    def status(self) -> str:
-        """当前演示状态"""
-        return f"Step {self.current_step}/{self.total_steps}: {self.timeline[self.current_step]['title']}"
+TIMELINE = (
+    ("0:00–0:40", "启动 Tauri App 与授权 Workspace"),
+    ("0:40–1:30", "展示 Quick/Deep 共用工作台"),
+    ("1:30–2:30", "提交真实 Quick MATLAB 2D 小网格运行"),
+    ("2:30–3:20", "检查迭代、制品、哈希与 solver provenance"),
+    ("3:20–4:00", "Quick → Deep 不可变晋升"),
+    ("4:00–5:10", "ExperimentDraft、预算和人工审批"),
+    ("5:10–6:10", "Evaluator 分轴状态与受控对比"),
+    ("6:10–7:15", "Final Reviewer REVISE / APPROVE 双路径"),
+    ("7:15–8:00", "报告门禁与复现证据"),
+)
 
-    def next(self) -> dict:
-        """下一步"""
-        if self.current_step < self.total_steps - 1:
-            self.current_step += 1
-        return self.timeline[self.current_step]
 
-    def get_script(self) -> str:
-        """输出完整脚本"""
-        lines = []
-        for step in self.timeline:
-            lines.append(f"[{step['time']}] {step['title']}")
-            lines.append(f"  -> {step['action']}")
-        return "\n".join(lines)
+def _load_json(path: Path) -> dict[str, Any]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"cannot read {path.relative_to(ROOT)}: {exc}") from exc
+    if not isinstance(value, dict):
+        raise ValueError(f"{path.relative_to(ROOT)} must contain a JSON object")
+    return value
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest().upper()
+
+
+def collect_preflight() -> dict[str, Any]:
+    audit_path = ROOT / "release_audit.json"
+    campaign_path = ROOT / "docs/validation/2026-08-25-v6.3-online-campaign.md"
+    contracts_path = ROOT / "topoptpilot/tools/contracts.py"
+    installer_path = (
+        ROOT / "desktop/src-tauri/target/release/bundle/nsis/"
+        "TopOptPilot_6.3.0_x64-setup.exe"
+    )
+
+    checks: list[dict[str, Any]] = []
+
+    try:
+        audit = _load_json(audit_path)
+        checks.extend((
+            {"id": "audit_version", "required": True,
+             "pass": audit.get("version") == EXPECTED_VERSION,
+             "detail": f"recorded={audit.get('version')} expected={EXPECTED_VERSION}"},
+            {"id": "offline_release_ready", "required": True,
+             "pass": audit.get("offline_release_ready") is True,
+             "detail": str(audit.get("offline_release_ready"))},
+            {"id": "online_agent", "required": True,
+             "pass": (audit.get("online_agent") or {}).get("pass") is True,
+             "detail": str((audit.get("online_agent") or {}).get("pass"))},
+            {"id": "reviewer_gate", "required": True,
+             "pass": (audit.get("online_agent") or {}).get("reviewer_gate_verified") is True,
+             "detail": str((audit.get("online_agent") or {}).get("reviewer_gate_verified"))},
+        ))
+    except ValueError as exc:
+        checks.append({"id": "release_audit", "required": True, "pass": False, "detail": str(exc)})
+
+    checks.extend((
+        {"id": "campaign_record", "required": True, "pass": campaign_path.is_file(),
+         "detail": campaign_path.relative_to(ROOT).as_posix()},
+        {"id": "tool_contract", "required": True, "pass": contracts_path.is_file(),
+         "detail": contracts_path.relative_to(ROOT).as_posix()},
+    ))
+
+    if installer_path.is_file():
+        actual = _sha256(installer_path)
+        checks.append({"id": "installer_sha256", "required": False,
+                       "pass": actual == EXPECTED_INSTALLER_SHA256,
+                       "detail": actual})
+    else:
+        checks.append({"id": "installer_sha256", "required": False, "pass": None,
+                       "detail": "installer not present in this checkout"})
+
+    required_pass = all(item["pass"] is True for item in checks if item["required"])
+    return {"version": EXPECTED_VERSION, "requiredPass": required_pass, "checks": checks}
+
+
+def print_preflight(report: dict[str, Any]) -> None:
+    print(f"TopOptPilot V{report['version']} demo evidence preflight")
+    for item in report["checks"]:
+        status = "PASS" if item["pass"] is True else "WARN" if item["pass"] is None else "FAIL"
+        scope = "required" if item["required"] else "optional"
+        print(f"[{status:4}] {item['id']:<24} {scope:<8} {item['detail']}")
+    print("PREFLIGHT=" + ("PASS" if report["requiredPass"] else "FAIL"))
+
+
+def print_timeline() -> None:
+    print("TopOptPilot V6.3 desktop demonstration timeline")
+    for period, action in TIMELINE:
+        print(f"{period}  {action}")
+    print("\nAll live metrics must come from the current run or an explicitly dated evidence record.")
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Validate V6.3 demo evidence without running FEM or an Agent")
+    parser.add_argument("--check", action="store_true", help="print the evidence preflight")
+    parser.add_argument("--timeline", action="store_true", help="print the eight-minute desktop timeline")
+    parser.add_argument("--json", action="store_true", help="emit the evidence preflight as JSON")
+    args = parser.parse_args()
+
+    report = collect_preflight()
+    if args.json:
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+    else:
+        if args.check or not args.timeline:
+            print_preflight(report)
+        if args.timeline:
+            print_timeline()
+    return 0 if report["requiredPass"] else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
