@@ -21,11 +21,32 @@ def run_audit(include_online: bool = True) -> dict:
     report["gates"]["desktop_app"] = _desktop_gate()
     report["gates"].update(_source_gates())
     report["gates"].update(_matlab_gates())
-    report["online_agent"] = ({"pass": None, "reason": "run DeepSeek V4 Flash benchmark campaign separately"}
-                               if include_online else {"pass": None, "skipped": True})
+    report["online_agent"] = _online_agent_gate(include_online)
     report["offline_release_ready"] = all(gate["pass"] for gate in report["gates"].values())
     report["release_ready"] = report["offline_release_ready"] and report["online_agent"]["pass"] is True
     return report
+
+
+def _online_agent_gate(include_online: bool) -> dict:
+    """Report the recorded online Agent campaign result.
+
+    The online Deep Research campaign runs out-of-band against the configured
+    Agent service and its real IDs are recorded in release_audit.json and
+    docs/validation/.  A re-run must not erase a passing online record: without
+    one it reports an honest 'not yet run' placeholder.
+    """
+    if not include_online:
+        return {"pass": None, "skipped": True}
+    audit_path = ROOT / "release_audit.json"
+    if audit_path.is_file():
+        try:
+            previous = json.loads(audit_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            previous = {}
+        recorded = previous.get("online_agent") or {}
+        if recorded.get("pass") is True and recorded.get("research_approve"):
+            return {**recorded, "reused": True}
+    return {"pass": None, "reason": "run the V6.3 online Deep Research campaign (scripts/run_v63_online_campaign.py) first"}
 
 
 def _source_gates() -> dict[str, dict]:

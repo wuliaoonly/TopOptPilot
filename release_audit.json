@@ -1,5 +1,5 @@
 {
-  "timestamp": "2026-08-25T20:05:52+0800",
+  "timestamp": "2026-08-25T23:17:36+0800",
   "version": "6.3.0",
   "gates": {
     "artifacts": {
@@ -87,9 +87,44 @@
     }
   },
   "online_agent": {
-    "pass": null,
-    "skipped": true
+    "pass": true,
+    "model": "deepseek-v4-flash",
+    "base_url": "https://api.ai-pixel.online/v1",
+    "key_source": "credential_manager",
+    "campaign_timestamp": "2026-08-25T23:09:08+0800",
+    "campaign_record": "docs/validation/2026-08-25-v6.3-online-campaign.md",
+    "research_approve": {
+      "id": "MBB-001",
+      "final_review_task": "SA-DC9BF7B9ED",
+      "verdict": "APPROVE",
+      "report_markdown": "E:\\AAAwuliao2\\TopOptPilot-v6.2.2-integration\\build\\v63-online-campaign\\MBB-001\\reports\\report.md",
+      "experiments": [
+        "E01",
+        "E02"
+      ],
+      "hypotheses": [
+        "H-F928A413EF"
+      ],
+      "subagents": [
+        "SA-4077D787D0",
+        "SA-DC9BF7B9ED"
+      ]
+    },
+    "research_revise": {
+      "id": "MBB-002",
+      "final_review_task": "SA-A6B2716F76",
+      "verdict": "REVISE",
+      "experiments": [
+        "E03"
+      ],
+      "subagents": [
+        "SA-A6B2716F76"
+      ]
+    },
+    "reviewer_gate_verified": true,
+    "note": "report_path raised FINAL_REPORT_NOT_READY before APPROVE on both researches; final report generated only after APPROVE.",
+    "reused": true
   },
   "offline_release_ready": true,
-  "release_ready": false
+  "release_ready": true
 }

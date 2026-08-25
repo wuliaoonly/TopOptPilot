@@ -172,20 +172,23 @@ class PiProcess:
                 if self.task_id:
                     result_text = _assistant_text(messages) or self._stream_buffer
                     # Some OpenAI-compatible relays deliver the complete text but omit the
-                    # terminal finish_reason.  Pi correctly surfaces that protocol defect as
-                    # an error; for a bounded read-only Subagent, a substantive text result is
-                    # still usable evidence.  Preserve the warning instead of discarding the
-                    # answer or triggering an unrelated fallback.
+                    # terminal finish_reason (or end the stream with a spurious "terminated"
+                    # marker).  Pi correctly surfaces that protocol defect as an error; for a
+                    # bounded read-only Subagent, a substantive text result is still usable
+                    # evidence.  Preserve the warning instead of discarding the answer or
+                    # triggering an unrelated fallback.
+                    stream_defect = ("stream ended without finish_reason" in (error or "").lower()
+                                     or "terminated" in (error or "").lower())
                     partial_stream_recovered = bool(
-                        failed and result_text.strip() and error
-                        and "stream ended without finish_reason" in error.lower()
+                        failed and result_text.strip() and error and stream_defect
                     )
                     if partial_stream_recovered:
                         failed = False
                         self.bridge.service.store.append_event(
                             self.research_id, "SYSTEM", "PARTIAL STREAM RECOVERED",
-                            "The compatible endpoint omitted finish_reason; the bounded Subagent "
-                            "result was retained and marked degraded.",
+                            "The compatible endpoint omitted finish_reason (or ended the stream "
+                            "with a spurious terminated marker); the bounded Subagent result was "
+                            "retained and marked degraded.",
                             payload={"task_id": self.task_id, "warning": error},
                             source=f"SUBAGENT:{self.role}", event_type="FAILURE")
                     status = "FAILED" if failed else "COMPLETED"

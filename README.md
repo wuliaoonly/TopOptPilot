@@ -5,8 +5,10 @@
 > Qwen API Key 只从进程环境变量 `DASHSCOPE_API_KEY` 读取，不写入 SQLite、日志、报告或系统凭据存储。
 > 科研 fidelity 映射为 **F0/F1=Python 2D、F2=Python 3D、F3=MATLAB MCP**；只有 F3 强制人工审批，
 > 且 MCP 故障不得回退为 Python 并宣称 F3 成功。工程 MATLAB/Runtime 链路与科研 F3 权限保持隔离。
-> 产品只提供 Tauri 原生桌面端，不提供 Streamlit 或独立浏览器版入口。离线发布门禁已通过；
-> 在线 Agent campaign、干净 Windows 安装和签名仍需独立发布门禁。详见 [V6.3 待测试清单](docs/validation/V6.3-待测试清单.md)。
+> 产品只提供 Tauri 原生桌面端，不提供 Streamlit 或独立浏览器版入口。离线与在线发布门禁均已通过
+> （`release_ready=true`，在线受控 Deep Research campaign 覆盖 FINAL_REVIEW REVISE 与 APPROVE 两条路径，
+> 见 [V6.3 在线 Campaign 实测记录](docs/validation/2026-08-25-v6.3-online-campaign.md)）；
+> 干净 Windows 安装和代码签名仍需独立环境复验。详见 [V6.3 待测试清单](docs/validation/V6.3-待测试清单.md)。
 
 ## 📑 快速导航
 
@@ -64,7 +66,7 @@ powershell -ExecutionPolicy Bypass -File scripts/build_desktop.ps1
 ```
 
 正式打包成功后，NSIS 输出位于 `desktop/src-tauri/target/release/bundle/nsis/`，产品版本为 TopOptPilot V6.3。
-当前候选安装包已通过开发机离线门禁；未完成待测试清单前，不将其描述为正式 Release。
+安装包已通过开发机离线与在线发布门禁（`release_ready=true`），对应标签 `v6.3.0`。
 
 ### iDeskTop v2 融合能力
 
