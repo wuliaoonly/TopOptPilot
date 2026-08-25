@@ -14,6 +14,29 @@ const ALLOWED_EXTENSIONS: &[&str] = &["m", "json", "md", "txt", "log", "csv"];
 const PATCH_APPROVAL_TTL: Duration = Duration::from_secs(120);
 
 const MAX_PATCH_APPROVALS: usize = 256;
+const WORKSPACE_GRANT_TTL: Duration = Duration::from_secs(60 * 60);
+
+/// Per-launch signing material shared only with the local sidecar.  The grant
+/// payload deliberately omits the filesystem root from its JSON response.
+pub struct WorkspaceGrantState {
+    secret: String,
+}
+
+impl WorkspaceGrantState {
+    pub fn new(secret: String) -> Self {
+        Self { secret }
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceGrant {
+    pub workspace_id: String,
+    pub project_id: String,
+    pub expires_at: u64,
+    pub allowed_extensions: Vec<String>,
+    pub grant: String,
+}
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ProjectEntry {
     pub relative_path: String,
@@ -324,6 +347,38 @@ pub async fn project_pick_folder() -> Result<Option<String>, String> {
 pub fn project_open(root: String) -> Result<serde_json::Value, String> {
     let canonical = root_path(&root)?;
     Ok(serde_json::json!({"root": canonical, "projectId": project_id_for_root(&canonical)}))
+}
+#[tauri::command]
+pub fn workspace_grant(
+    state: State<'_, WorkspaceGrantState>,
+    root: String,
+    workspace_id: String,
+) -> Result<WorkspaceGrant, String> {
+    let canonical = root_path(&root)?;
+    let project_id = project_id_for_root(&canonical);
+    let expires_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|error| error.to_string())?
+        .as_secs()
+        + WORKSPACE_GRANT_TTL.as_secs();
+    let allowed_extensions: Vec<String> = ALLOWED_EXTENSIONS.iter().map(|item| item.to_string()).collect();
+    let mut signer = Sha256::new();
+    signer.update(b"topoptpilot-workspace-grant-v1");
+    hash_field(&mut signer, state.secret.as_bytes());
+    hash_field(&mut signer, canonical.to_string_lossy().as_bytes());
+    hash_field(&mut signer, workspace_id.as_bytes());
+    hash_field(&mut signer, project_id.as_bytes());
+    hash_field(&mut signer, expires_at.to_string().as_bytes());
+    for extension in &allowed_extensions {
+        hash_field(&mut signer, extension.as_bytes());
+    }
+    Ok(WorkspaceGrant {
+        workspace_id,
+        project_id,
+        expires_at,
+        allowed_extensions,
+        grant: format!("{:x}", signer.finalize()),
+    })
 }
 #[tauri::command]
 pub fn project_list(root: String) -> Result<Vec<ProjectEntry>, String> {

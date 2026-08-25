@@ -1,12 +1,12 @@
 {
-  "timestamp": "2026-08-24T19:24:17+0800",
-  "version": "6.1.1",
+  "timestamp": "2026-08-25T23:17:36+0800",
+  "version": "6.3.0",
   "gates": {
     "artifacts": {
       "pass": true,
-      "skills": 6,
       "tools": 16,
-      "agents_constitution": true
+      "generated": "E:\\AAAwuliao2\\TopOptPilot-v6.2.2-integration\\.pi\\generated\\topopt-tools.ts",
+      "canonical": "E:\\AAAwuliao2\\TopOptPilot-v6.2.2-integration\\topoptpilot\\tools\\contracts.py"
     },
     "desktop_app": {
       "pass": true,
@@ -14,49 +14,28 @@
       "runtime_optional": true,
       "runtime_in_standard_package": false,
       "missing_resources": [],
-      "executable": "F:\\Other\\揭榜挂帅\\iDeskTop v2\\.worktrees\\remote-pr\\desktop\\src-tauri\\target\\release\\idesktop-v2.exe",
-      "installer": "F:\\Other\\揭榜挂帅\\iDeskTop v2\\.worktrees\\remote-pr\\desktop\\src-tauri\\target\\release\\bundle\\nsis\\iDeskTop v2_2.0.0_x64-setup.exe"
+      "executable": "E:\\AAAwuliao2\\TopOptPilot-v6.2.2-integration\\desktop\\src-tauri\\target\\release\\topoptpilot-desktop.exe",
+      "installer": "E:\\AAAwuliao2\\TopOptPilot-v6.2.2-integration\\desktop\\src-tauri\\target\\release\\bundle\\nsis\\TopOptPilot_6.3.0_x64-setup.exe"
     },
-    "strict_f3": {
-      "pass": true,
-      "evidence": "F3 requires a live approved MatlabMcpWorker; Python fallback is forbidden"
-    },
-    "i18n_zh_default": {
-      "pass": true,
-      "default": "zh-CN",
-      "locales": [
-        "zh-CN",
-        "en-US"
-      ]
-    },
-    "v5_visual_consistency": {
+    "direct_solver_schema": {
       "pass": true
     },
-    "research_contract": {
+    "isolated_agent_roles": {
       "pass": true
     },
-    "agent_provenance": {
-      "pass": true
-    },
-    "evaluator_first": {
-      "pass": true
-    },
-    "websocket_realtime": {
-      "pass": true
-    },
-    "experiment_canvas": {
+    "direct_matlab_only": {
       "pass": true
     },
     "guided_setup": {
       "pass": true
     },
-    "offline_knowledge": {
+    "research_canvas": {
       "pass": true
     },
-    "isolated_subagents": {
+    "agent_provenance": {
       "pass": true
     },
-    "fidelity_lane_mapping": {
+    "websocket_realtime": {
       "pass": true
     },
     "fact_grounded_reports": {
@@ -65,17 +44,26 @@
     "credential_not_in_sqlite": {
       "pass": true
     },
+    "tool_whitelist": {
+      "pass": true
+    },
+    "engineering_solver_manifest": {
+      "pass": true,
+      "manifest": "E:\\AAAwuliao2\\TopOptPilot-v6.2.2-integration\\matlab\\engineering\\solver-sources.json",
+      "files": 24,
+      "hash_mode": "sha256-canonical-lf",
+      "missing": [],
+      "mismatches": []
+    },
     "matlab_mcp_2d": {
       "pass": true,
-      "backend": "matlab_mcp_2d",
-      "matlab_version": "24.2.0.2712019 (R2024b)",
+      "matlab_version": "24.1.0.2537033 (R2024a)",
       "mcp_version": "0.12.0",
       "solver_entry_sha256": "272f7ce380b1256ef865553fc6a6358c99ebe7e9f39a4991875882fd77c59e6e"
     },
     "matlab_mcp_3d": {
       "pass": true,
-      "backend": "matlab_mcp_3d",
-      "matlab_version": "24.2.0.2712019 (R2024b)",
+      "matlab_version": "24.1.0.2537033 (R2024a)",
       "mcp_version": "0.12.0",
       "solver_entry_sha256": "3fbbca049ef1b5ccd146e82b1516b8d205409913e13690bba6065d77255fc2bb"
     },
@@ -83,252 +71,60 @@
       "pass": true,
       "dimension": 2,
       "compliance": {
-        "reference_cpu": 289.12275754922695,
-        "optimized_cpu": 289.12275754922695,
-        "optimized_cpu_reproduced": 289.12275754922695
+        "reference_cpu": 721.2631025627071,
+        "optimized_cpu": 721.2631025627071,
+        "optimized_cpu_reproduced": 721.2631025627071
       },
       "relative_error_reference_vs_optimized": 0.0,
       "relative_error_rerun_reproducibility": 0.0,
       "density_identical_across_labels": true,
       "iterations_match": true,
-      "matlab_version": "24.2.0.2712019 (R2024b)",
+      "matlab_version": "24.1.0.2537033 (R2024a)",
       "variant_labels": {
         "reference": "reference_cpu",
         "optimized": "optimized_cpu"
       }
-    },
-    "matlab_warmup": {
-      "pass": true,
-      "cold_start_ms": 0,
-      "probe_ms": 110,
-      "mcp_startup_ms": 1422,
-      "completed_at": "2026-08-24T19:25:33+0800",
-      "capabilities": {
-        "variants": [
-          "reference_cpu",
-          "optimized_cpu",
-          "gpu"
-        ],
-        "selected_variant": "optimized_cpu",
-        "acceleration_mode": "vectorized_cpu",
-        "parallel_available": true,
-        "gpu_available": true,
-        "mex_2d_available": false,
-        "mex_3d_available": false,
-        "probed": true
-      }
-    },
-    "cases": {
-      "pass": true
-    },
-    "baselines": {
-      "pass": true
-    },
-    "safe_mode": {
-      "pass": true
-    },
-    "online_qwen": {
-      "pass": null
-    },
-    "pi_closed_loop": {
-      "pass": null
-    },
-    "benchmark_pi_vs_baselines": {
-      "pass": null
     }
   },
-  "cases": {
-    "A": {
-      "research_id": "MBB-001",
-      "experiments": 4,
-      "fidelities": [
-        "F0",
-        "F0",
-        "F0",
-        "F0"
-      ],
-      "metrics": {
-        "best_feasible_objective": 101.11793344036809,
-        "experiments_to_feasible": 4,
-        "high_fidelity_runs": 0,
-        "constraint_violation_rate": 0.75,
-        "best_compliance": 101.11793344036809,
-        "best_gray_ratio": 0.02,
-        "total_fem_cost": 4.0,
-        "human_interventions": 0,
-        "final_regret": null,
-        "invalid_intent_rate": 0.0,
-        "policy_rejection_rate": 0.0,
-        "repeated_experiment_rate": 0.0,
-        "unnecessary_fidelity_upgrade_rate": 0.0,
-        "approval_count": 0
-      },
-      "real_backends": [
-        "python",
-        "python",
-        "python",
-        "python"
-      ]
-    },
-    "B": {
-      "research_id": "MBB-002",
-      "experiments": 7,
-      "fidelities": [
-        "F0",
-        "F0",
-        "F0",
-        "F0",
-        "F0",
-        "F0",
-        "F0"
-      ],
-      "metrics": {
-        "best_feasible_objective": 316.49604226085836,
-        "experiments_to_feasible": 4,
-        "high_fidelity_runs": 0,
-        "constraint_violation_rate": 0.5714285714285714,
-        "best_compliance": 244.83257807558783,
-        "best_gray_ratio": 0.0067,
-        "total_fem_cost": 7.0,
-        "human_interventions": 0,
-        "final_regret": null,
-        "invalid_intent_rate": 0.0,
-        "policy_rejection_rate": 0.0,
-        "repeated_experiment_rate": 0.0,
-        "unnecessary_fidelity_upgrade_rate": 0.0,
-        "approval_count": 0
-      },
-      "real_backends": [
-        "python",
-        "python",
-        "python",
-        "python",
-        "python",
-        "python",
-        "python"
-      ]
-    },
-    "C": {
-      "research_id": "MBB-003",
-      "experiments": 7,
-      "fidelities": [
-        "F0",
-        "F0",
-        "F0",
-        "F0",
-        "F1",
-        "F2",
-        "F3"
-      ],
-      "metrics": {
-        "best_feasible_objective": 104.32739320742002,
-        "experiments_to_feasible": 4,
-        "high_fidelity_runs": 2,
-        "constraint_violation_rate": 0.5714285714285714,
-        "best_compliance": 101.9603866139142,
-        "best_gray_ratio": 0.0064,
-        "total_fem_cost": 45.0,
-        "human_interventions": 1,
-        "final_regret": null,
-        "invalid_intent_rate": 0.0,
-        "policy_rejection_rate": 0.0,
-        "repeated_experiment_rate": 0.0,
-        "unnecessary_fidelity_upgrade_rate": 0.0,
-        "approval_count": 1
-      },
-      "real_backends": [
-        "python",
-        "python",
-        "python",
-        "python",
-        "python",
-        "python3d",
-        "matlab_mcp_3d"
-      ]
-    }
-  },
-  "baselines": {
-    "Random": {
-      "best_feasible_objective": null,
-      "experiments_to_feasible": null,
-      "high_fidelity_runs": 0,
-      "constraint_violation_rate": 1.0,
-      "best_compliance": 102.26938245984135,
-      "best_gray_ratio": 0.0556,
-      "total_fem_cost": 5.0,
-      "human_interventions": 0,
-      "final_regret": null,
-      "invalid_intent_rate": 0.0,
-      "policy_rejection_rate": 0.0,
-      "repeated_experiment_rate": 0.0,
-      "unnecessary_fidelity_upgrade_rate": 0.0,
-      "approval_count": 0
-    },
-    "Grid": {
-      "best_feasible_objective": null,
-      "experiments_to_feasible": null,
-      "high_fidelity_runs": 0,
-      "constraint_violation_rate": 1.0,
-      "best_compliance": 112.36240847279767,
-      "best_gray_ratio": 0.2267,
-      "total_fem_cost": 5.0,
-      "human_interventions": 0,
-      "final_regret": null,
-      "invalid_intent_rate": 0.0,
-      "policy_rejection_rate": 0.0,
-      "repeated_experiment_rate": 0.0,
-      "unnecessary_fidelity_upgrade_rate": 0.0,
-      "approval_count": 0
-    },
-    "TPE": {
-      "best_feasible_objective": 98.72298100399338,
-      "experiments_to_feasible": 2,
-      "high_fidelity_runs": 0,
-      "constraint_violation_rate": 0.8,
-      "best_compliance": 98.72298100399338,
-      "best_gray_ratio": 0.0089,
-      "total_fem_cost": 5.0,
-      "human_interventions": 0,
-      "final_regret": null,
-      "invalid_intent_rate": 0.0,
-      "policy_rejection_rate": 0.0,
-      "repeated_experiment_rate": 0.0,
-      "unnecessary_fidelity_upgrade_rate": 0.0,
-      "approval_count": 0
-    },
-    "Rule": {
-      "best_feasible_objective": null,
-      "experiments_to_feasible": null,
-      "high_fidelity_runs": 0,
-      "constraint_violation_rate": 1.0,
-      "best_compliance": 122.44026517243367,
-      "best_gray_ratio": 0.2778,
-      "total_fem_cost": 5.0,
-      "human_interventions": 0,
-      "final_regret": null,
-      "invalid_intent_rate": 0.0,
-      "policy_rejection_rate": 0.0,
-      "repeated_experiment_rate": 0.0,
-      "unnecessary_fidelity_upgrade_rate": 0.0,
-      "approval_count": 0
-    }
-  },
-  "safe_mode": {
+  "online_agent": {
     "pass": true,
-    "termination": "BUDGET_EXHAUSTED",
-    "intents": [
-      "ESTABLISH_BASELINE",
-      "REDUCE_GRAYNESS"
-    ],
-    "real_fem_residuals": [
-      2.8755583770255844e-13,
-      3.6365641564222977e-13
-    ]
-  },
-  "online_qwen": {
-    "pass": null,
-    "skipped": true
+    "model": "deepseek-v4-flash",
+    "base_url": "https://api.ai-pixel.online/v1",
+    "key_source": "credential_manager",
+    "campaign_timestamp": "2026-08-25T23:09:08+0800",
+    "campaign_record": "docs/validation/2026-08-25-v6.3-online-campaign.md",
+    "research_approve": {
+      "id": "MBB-001",
+      "final_review_task": "SA-DC9BF7B9ED",
+      "verdict": "APPROVE",
+      "report_markdown": "E:\\AAAwuliao2\\TopOptPilot-v6.2.2-integration\\build\\v63-online-campaign\\MBB-001\\reports\\report.md",
+      "experiments": [
+        "E01",
+        "E02"
+      ],
+      "hypotheses": [
+        "H-F928A413EF"
+      ],
+      "subagents": [
+        "SA-4077D787D0",
+        "SA-DC9BF7B9ED"
+      ]
+    },
+    "research_revise": {
+      "id": "MBB-002",
+      "final_review_task": "SA-A6B2716F76",
+      "verdict": "REVISE",
+      "experiments": [
+        "E03"
+      ],
+      "subagents": [
+        "SA-A6B2716F76"
+      ]
+    },
+    "reviewer_gate_verified": true,
+    "note": "report_path raised FINAL_REPORT_NOT_READY before APPROVE on both researches; final report generated only after APPROVE.",
+    "reused": true
   },
   "offline_release_ready": true,
-  "release_ready": false
+  "release_ready": true
 }

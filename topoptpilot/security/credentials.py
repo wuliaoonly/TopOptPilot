@@ -73,13 +73,19 @@ def _read_credential() -> str | None:
 
 
 def get_qwen_api_key() -> str:
-    return os.environ.get("DASHSCOPE_API_KEY") or _read_credential() or ""
+    # The credential the user explicitly saved in the Settings UI must win
+    # over a DASHSCOPE_API_KEY environment variable (which may persist stale
+    # values in the Windows user environment from earlier setups).
+    return (_read_credential() or os.environ.get("DASHSCOPE_API_KEY") or
+            os.environ.get("OPENAI_API_KEY") or os.environ.get("LLM_API_KEY") or "")
 
 
 def qwen_api_key_source() -> str:
-    if os.environ.get("DASHSCOPE_API_KEY"):
-        return "environment"
-    return "credential_manager" if _read_credential() else "not_configured"
+    if _read_credential():
+        return "credential_manager"
+    return ("environment" if (os.environ.get("DASHSCOPE_API_KEY") or
+                              os.environ.get("OPENAI_API_KEY") or
+                              os.environ.get("LLM_API_KEY")) else "not_configured")
 
 
 def delete_qwen_api_key() -> bool:

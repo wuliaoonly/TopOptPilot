@@ -1,5 +1,6 @@
 {
   "schemaVersion": 1,
+  "packagedHashMode": "sha256-canonical-lf",
   "sourceLabel2d": "TopOpt_2D",
   "sourceLabel3d": "TopOpt-3D",
   "entry2d": "TopOpt_2D/topopt_main.m",
@@ -31,7 +32,7 @@
       "dimension": "2d",
       "file": "FE_solver.m",
       "sourceSha256": "9af8ca3630e96802e25495db92780d1de8041bd53e4ce411b68cab1da9253a43",
-      "packagedSha256": "9af8ca3630e96802e25495db92780d1de8041bd53e4ce411b68cab1da9253a43",
+      "packagedSha256": "63fbe1fe1e7f3468ae056a90f18e0b9dd159101b850a17554e4e474b1f26f79c",
       "instrumented": false
     },
     {
@@ -171,7 +172,7 @@
       "dimension": "3d",
       "file": "topopt3d_main.m",
       "sourceSha256": "8557f8647822a4107ab7de52ace9850f67f301f5cc2399f8fb9c1a1147949b7f",
-      "packagedSha256": "8557f8647822a4107ab7de52ace9850f67f301f5cc2399f8fb9c1a1147949b7f",
+      "packagedSha256": "03b04b6b923332d452f0a50a0d86115b059e1cd174894e01b2e88f5e87c9f98f",
       "instrumented": false
     }
   ]

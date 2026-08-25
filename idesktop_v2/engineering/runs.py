@@ -6,12 +6,14 @@ import asyncio
 import hashlib
 import json
 import os
-import re
 import threading
 import time
 import uuid
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
+from pathlib import PurePosixPath
+import re
 from typing import Any
 
 import numpy as np
@@ -27,7 +29,7 @@ from idesktop_v2.engineering.runtime_profiles import RuntimeProfileError, runtim
 
 def _data_root() -> Path:
     root = os.environ.get("IDESKTOP_V2_DATA_DIR") or os.environ.get("TOPPILOT_DATA_DIR")
-    local = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData/Local")) / "iDeskTopV2"
+    local = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData/Local")) / "TopOptPilot"
     return (Path(root).expanduser().resolve() if root else local) / "runs"
 
 
@@ -44,9 +46,12 @@ class RunCreateRequest(BaseModel):
     lane: SolverLane
     runtime_profile_id: str | None = Field(default=None, min_length=1, max_length=160)
     owner_id: str = Field(default="engineering", min_length=1, max_length=160)
+    workspace_id: str | None = Field(default=None, min_length=1, max_length=160)
     task: dict[str, Any] = Field(default_factory=dict)
     max_iter: int | None = Field(default=None, ge=1, le=2000)
     time_limit: float | None = Field(default=None, ge=0.1, le=86400)
+    generated_files: dict[str, str] = Field(default_factory=dict)
+    generated_entrypoint: str | None = None
 
     @model_validator(mode="before")
     @classmethod
@@ -54,9 +59,12 @@ class RunCreateRequest(BaseModel):
         if isinstance(value, dict):
             value = dict(value)
             value.setdefault("owner_id", value.pop("ownerId", "engineering"))
+            value.setdefault("workspace_id", value.pop("workspaceId", None))
             value.setdefault("max_iter", value.pop("maxIter", None))
             value.setdefault("time_limit", value.pop("timeLimit", None))
             value.setdefault("runtime_profile_id", value.pop("runtimeProfileId", None))
+            value.setdefault("generated_files", value.pop("generatedFiles", {}))
+            value.setdefault("generated_entrypoint", value.pop("generatedEntrypoint", None))
         return value
 
     @model_validator(mode="after")
@@ -66,32 +74,50 @@ class RunCreateRequest(BaseModel):
                 "runtimeProfileId 只能用于 compiled-runtime lane"
             )
 
-        task = self.task
-        dimension = str(task.get("dimension") or "3d").lower()
+        if self.generated_files:
+            if self.lane is not SolverLane.LOCAL_MATLAB:
+                raise ValueError("generatedFiles 只能用于 local-matlab 快速沙箱")
+            if not self.generated_entrypoint:
+                raise ValueError("generatedFiles requires generatedEntrypoint")
+            if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,79}", self.generated_entrypoint):
+                raise ValueError("generatedEntrypoint must be a MATLAB identifier")
+            if sum(len(value.encode("utf-8")) for value in self.generated_files.values()) > 500_000:
+                raise ValueError("generatedFiles exceeds the 500 KB sandbox limit")
+            reserved = {"run_topopt_job.m", "idesktop_terminal_bridge.m"}
+            for raw in self.generated_files:
+                path = PurePosixPath(raw.replace("\\", "/"))
+                if (path.is_absolute() or ".." in path.parts or path.suffix.lower() not in
+                        {".m", ".json", ".md", ".txt"} or path.name.lower() in reserved):
+                    raise ValueError("generated file path is outside the quick sandbox contract")
+            if f"{self.generated_entrypoint}.m" not in self.generated_files:
+                raise ValueError("generatedEntrypoint must name a generated MATLAB file")
+        elif self.generated_entrypoint:
+            raise ValueError("generatedEntrypoint requires generatedFiles")
+
+        dimension = str(self.task.get("dimension") or "3d").lower()
         if dimension not in {"2d", "3d"}:
             raise ValueError("task.dimension 仅支持 2d 或 3d")
-        geometry = task.get("geometry") or {}
-        params = task.get("params") or {}
+        geometry = self.task.get("geometry") or {}
+        params = self.task.get("params") or {}
         if not isinstance(geometry, dict) or not isinstance(params, dict):
             raise ValueError("task.geometry 和 task.params 必须是对象")
-        load_case = str(task.get("load_case") or "cantilever")
-        if load_case not in {"cantilever", "MBB", "mbb", "simply_supported", "L-bracket", "vertical", "lateral"}:
+        load_case = str(self.task.get("load_case") or "cantilever")
+        if load_case not in {"cantilever", "MBB", "simply_supported", "L-bracket", "vertical", "lateral"}:
             raise ValueError("load_case 不是受支持的内置工况")
-        for key in ("nelx", "nely", "nelz"):
-            if key in geometry and (isinstance(geometry[key], bool) or not isinstance(geometry[key], int) or geometry[key] <= 0):
+        required_axes = ("nelx", "nely") if dimension == "2d" else ("nelx", "nely", "nelz")
+        for key in required_axes:
+            value = geometry.get(key)
+            if value is not None and (isinstance(value, bool) or not isinstance(value, int) or value <= 0):
                 raise ValueError(f"geometry.{key} 必须是正整数")
-        volfrac = params.get("volfrac")
-        if volfrac is not None and not 0 < float(volfrac) <= 1:
+        if params.get("volfrac") is not None and not 0 < float(params["volfrac"]) <= 1:
             raise ValueError("volfrac 必须大于 0 且不超过 1")
-        penal = params.get("penal")
-        if penal is not None and float(penal) < 1:
-            raise ValueError("penal 必须不小于 1")
-        rmin = params.get("rmin")
-        if rmin is not None and float(rmin) <= 0:
+        if params.get("penal") is not None and not 1 <= float(params["penal"]) <= 5:
+            raise ValueError("penal 必须在 1 到 5 之间")
+        if params.get("rmin") is not None and float(params["rmin"]) <= 0:
             raise ValueError("rmin 必须大于 0")
-        max_iterations = int(params.get("max_iter", self.max_iter or 60))
-        min_iterations = int(params.get("min_iter", 1))
-        if min_iterations < 1 or max_iterations < 1 or min_iterations > max_iterations:
+        maximum = int(params.get("max_iter", self.max_iter or 60))
+        minimum = int(params.get("min_iter", 1))
+        if minimum < 1 or maximum < 1 or minimum > maximum:
             raise ValueError("迭代范围无效：必须满足 1 <= min_iter <= max_iter")
         if params.get("filter_strategy", "fixed") not in {"fixed", "adaptive"}:
             raise ValueError("filter_strategy 仅支持 fixed 或 adaptive")
@@ -107,6 +133,9 @@ class _Run:
     task: dict[str, Any]
     config_digest: str
     run_dir: Path
+    # Kept after the historical positional constructor fields so persisted-run
+    # compatibility and external runtime tests do not receive a shifted lane.
+    workspace_id: str | None = None
     runtime_profile_id: str | None = None
     status: RunStatus = RunStatus.QUEUED
     metrics: dict[str, float | None] = field(default_factory=dict)
@@ -149,6 +178,7 @@ class RunManager:
                 "schemaVersion": 1,
                 "run": record.public(),
                 "task": record.task,
+                "workspaceId": record.workspace_id,
                 "runtimeProfileId": record.runtime_profile_id,
                 "events": list(record.events),
             }
@@ -175,7 +205,8 @@ class RunManager:
             if artifact.run_id != run_id:
                 return None
             record = _Run(
-                run_id=artifact.run_id, owner_id=artifact.owner_id, lane=artifact.lane,
+                run_id=artifact.run_id, owner_id=artifact.owner_id, workspace_id=payload.get("workspaceId"),
+                lane=artifact.lane,
                 task=dict(payload.get("task") or {}), config_digest=artifact.config_digest,
                 run_dir=run_dir, runtime_profile_id=payload.get("runtimeProfileId"),
                 status=artifact.status, metrics=dict(artifact.metrics),
@@ -201,11 +232,25 @@ class RunManager:
         task = json.loads(json.dumps(request.task, ensure_ascii=False))
         if request.max_iter is not None:
             task.setdefault("params", {})["max_iter"] = request.max_iter
-        canonical = json.dumps({"lane": request.lane.value, "ownerId": request.owner_id, "runtimeProfileId": request.runtime_profile_id, "task": task}, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        canonical = json.dumps({"lane": request.lane.value, "ownerId": request.owner_id, "workspaceId": request.workspace_id,
+                                "runtimeProfileId": request.runtime_profile_id, "task": task,
+                                "generatedFiles": request.generated_files,
+                                "generatedEntrypoint": request.generated_entrypoint},
+                               ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         run_id = f"eng-{uuid.uuid4().hex}"
         run_dir = _data_root() / run_id
         run_dir.mkdir(parents=True, exist_ok=False)
-        record = _Run(run_id, request.owner_id, request.lane, task, hashlib.sha256(canonical.encode("utf-8")).hexdigest(), run_dir, runtime_profile_id=request.runtime_profile_id)
+        if request.generated_files:
+            source_dir = run_dir / "source"
+            for relative, content in request.generated_files.items():
+                target = (source_dir / Path(*PurePosixPath(relative).parts)).resolve()
+                if source_dir.resolve() not in target.parents:
+                    raise ValueError("generated file escaped the quick sandbox")
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(content, encoding="utf-8")
+            task["_generated_entrypoint"] = request.generated_entrypoint
+        record = _Run(run_id, request.owner_id, request.lane, task, hashlib.sha256(canonical.encode("utf-8")).hexdigest(), run_dir,
+                      workspace_id=request.workspace_id, runtime_profile_id=request.runtime_profile_id)
         with self._lock:
             self._runs[run_id] = record
         self.persist(record)
@@ -233,6 +278,20 @@ class RunManager:
         with self._lock:
             return self._runs.setdefault(run_id, restored)
 
+    def list_workspace(self, workspace_id: str) -> list[_Run]:
+        """Return persisted Quick runs for one workspace without trusting paths."""
+        root = _data_root()
+        if not root.is_dir():
+            return []
+        records: list[_Run] = []
+        for child in root.iterdir():
+            if not child.is_dir():
+                continue
+            record = self.get(child.name)
+            if record and record.workspace_id == workspace_id:
+                records.append(record)
+        return sorted(records, key=lambda item: item.run_id, reverse=True)
+
     def cancel(self, run_id: str) -> _Run:
         record = self.get(run_id)
         if record is None:
@@ -252,8 +311,20 @@ class RunManager:
             return list(record.events)
 
     def _emit(self, record: _Run, event: dict[str, Any]) -> None:
+        payload = dict(event)
+        envelope = {
+            "eventId": f"QEV-{uuid.uuid4().hex[:12].upper()}",
+            "source": "ENGINEERING",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "ownerType": "engineering_run",
+            "ownerId": record.run_id,
+            "runId": record.run_id,
+            "experimentId": None,
+            "payload": payload,
+            **event,
+        }
         with record.lock:
-            record.events.append({"timestamp": time.time(), **event})
+            record.events.append(envelope)
         self.persist(record)
 
     @staticmethod
@@ -286,18 +357,11 @@ class RunManager:
                 "grayRatio": float(state["gray_ratio"]) if state.get("gray_ratio") is not None else None,
             })
             metrics = dict(record.metrics)
-
-        event: dict[str, Any] = {
-            "type": "progress",
-            "iteration": iteration,
-            "metrics": metrics,
-        }
+        event: dict[str, Any] = {"type": "progress", "iteration": iteration, "metrics": metrics}
         raw_snapshot = state.get("snapshot")
         if isinstance(raw_snapshot, dict):
-            snapshot_event = {
-                key: raw_snapshot.get(key)
-                for key in ("densityPath", "stressPath", "shape", "dtype", "order", "dimension")
-            }
+            snapshot_event = {key: raw_snapshot.get(key) for key in
+                              ("densityPath", "stressPath", "shape", "dtype", "order", "dimension")}
             indexed: dict[str, ArtifactRef] = {}
             for key in ("densityPath", "stressPath"):
                 raw_path = snapshot_event.get(key)
@@ -311,9 +375,8 @@ class RunManager:
                     candidate.relative_to(record.run_dir.resolve())
                 except ValueError:
                     continue
-                if not candidate.is_file():
-                    continue
-                indexed[key] = self._ref(record.run_dir, candidate)
+                if candidate.is_file():
+                    indexed[key] = self._ref(record.run_dir, candidate)
             if "densityPath" in indexed:
                 with record.lock:
                     by_path = {item.relative_path: item for item in record.snapshots}
@@ -418,7 +481,13 @@ class RunManager:
             probe = asyncio.run(probe_matlab_installation(installations[0]))
             if not probe.usable:
                 raise MatlabInfrastructureError(f"MATLAB 探针失败：{probe.diagnostic}")
-            summary = run_matlab_batch(installations[0].executable, record.task, record.run_dir, source_root=source_root, cancel=record.cancel_event.is_set, timeout_seconds=time_limit, progress=progress)
+            overlay = record.run_dir / "source"
+            summary = run_matlab_batch(
+                installations[0].executable, record.task, record.run_dir,
+                source_root=source_root,
+                source_overlay=overlay if overlay.is_dir() else None,
+                entrypoint=str(record.task.get("_generated_entrypoint") or "run_topopt_job"),
+                cancel=record.cancel_event.is_set, timeout_seconds=time_limit, progress=progress)
         elif record.lane is SolverLane.COMPILED_RUNTIME:
             try:
                 profile = runtime_profiles.resolve(record.runtime_profile_id or "")

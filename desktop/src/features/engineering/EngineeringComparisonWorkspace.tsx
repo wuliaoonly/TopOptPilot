@@ -26,7 +26,7 @@ export default function EngineeringComparisonWorkspace({ current, run, onError =
     if (!run || run.status !== "completed") return;
     setBusy(true);
     try {
-      const created = await api.engineeringComparisonSchemeCreate(run.runId);
+      const created = await api.engineeringComparisonSchemeCreate({ runId: run.runId });
       setSchemes(items => [created, ...items]);
     } catch (reason) { onError(String(reason)); }
     finally { setBusy(false); }

@@ -5,35 +5,25 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 import threading
 
-from topoptpilot.fidelity import FidelityManager
+from topoptpilot.solver_profiles import DirectSolverPolicy
 from topoptpilot.memory import ResearchMemory
 from topoptpilot.memory.retriever import retrieve_events
-from topoptpilot.policy.intent_compiler import IntentCompiler
-from topoptpilot.schemas import IntentRequest
+from topoptpilot.schemas.api_contracts import ExperimentDraft
+from topoptpilot.tools.contracts import ALLOWED_TOOLS
 
 if TYPE_CHECKING:
     from topoptpilot.service.research_service import ResearchService
-
-
-ALLOWED_TOOLS = {
-    "research_get_context", "research_query_history", "research_get_budget",
-    "policy_compile_intent", "experiment_preview", "experiment_submit",
-    "experiment_status", "experiment_result", "experiment_compare",
-    "research_get_pareto", "failure_get_evidence",
-    "knowledge_search", "knowledge_get", "solver_get_capabilities",
-    "subagent_dispatch", "subagent_status",
-}
 
 
 class ResearchTools:
     def __init__(self, service: "ResearchService"):
         self.service = service
         self.memory = ResearchMemory()
-        self.compiler = IntentCompiler()
         self._invocation = threading.local()
 
     def invoke(self, research_id: str, name: str, arguments: dict[str, Any],
                *, source: str = "API", role: str = "RESEARCH_LEAD") -> Any:
+        self.service._require_active_research(research_id)
         if name not in ALLOWED_TOOLS:
             raise PermissionError(f"Tool {name} is not allowed")
         if role != "RESEARCH_LEAD":
@@ -49,7 +39,7 @@ class ResearchTools:
         try:
             result = method(research_id, **arguments)
         except Exception as exc:
-            title = "INVALID INTENT" if name == "policy_compile_intent" else name
+            title = "INVALID DRAFT" if name == "experiment_validate_draft" else name
             self.service.store.append_event(research_id, "TOOL_RESULT", title,
                                             f"Tool rejected request: {exc}",
                                             payload={"error": str(exc)}, source=source,
@@ -79,35 +69,48 @@ class ResearchTools:
         return [{"event": event} for event in events] + [{"experiment": _compact(item)} for item in experiments]
 
     def research_get_budget(self, research_id: str) -> dict:
-        return FidelityManager.budget(self.service._require_research(research_id),
+        return DirectSolverPolicy.budget(self.service._require_research(research_id),
                                       self.service.store.list_experiments(research_id))
 
-    def policy_compile_intent(self, research_id: str, **arguments) -> list[dict]:
-        research = self.service._require_research(research_id)
-        source = arguments.pop("_decision_source", None) or getattr(self._invocation, "source", None) or "HUMAN"
-        request = IntentRequest.model_validate(arguments)
-        proposals = self.compiler.compile(research, self.service.store.list_experiments(research_id), request)
-        saved = []
-        session = self.service.store.get_agent_session(research_id) or {}
-        evidence_ids = [item["id"] for item in self.service.store.list_experiments(research_id)
-                        if item.get("result")][-6:]
-        for proposal in proposals:
-            data = proposal.model_dump(mode="json")
-            saved.append(self.service.store.create_proposal({**data, "status": "PREVIEW",
-                "decision_source": source, "intent_source": source,
-                "policy_version": "v6-intent-compiler-1",
-                "model": self.service.pi_runtime.model if source == "PI_AGENT" and self.service.pi_runtime else None,
-                "provider": "dashscope" if source == "PI_AGENT" else None,
-                "session_id": session.get("session_id"), "evidence_ids": evidence_ids}))
-        return saved
+    def experiment_validate_draft(self, research_id: str, **arguments) -> dict:
+        """Validate exact Agent parameters and persist at most one approval card.
+
+        This is intentionally not an intent compiler: the Agent supplies a
+        concrete, reviewable draft and cannot submit it itself.
+        """
+        source = getattr(self._invocation, "source", None) or "PI_AGENT"
+        draft = ExperimentDraft.model_validate(arguments)
+        validation = self.service.validate_experiment_draft(research_id, draft)
+        if not validation["valid"]:
+            return validation
+        pending = [item for item in self.service.store.list_proposals(research_id)
+                   if item.get("status") in {"PREVIEW", "PENDING_HUMAN_APPROVAL"}]
+        if pending:
+            raise ValueError("Only one Agent proposal may await human action per Research")
+        profile = DirectSolverPolicy.profile(self.service._require_research(research_id),
+                                             verify=draft.solver_profile == "verify")
+        proposal = self.service.store.create_proposal({
+            "id": f"P-{__import__('uuid').uuid4().hex[:10].upper()}", "research_id": research_id,
+            "intent": "AGENT_DRAFT", "purpose": draft.purpose, "fidelity": "DIRECT",
+            "backend": draft.backend, "parameters": draft.parameters,
+            "estimated_cost": validation["estimatedCost"], "dimension": draft.dimension,
+            "solver_profile": profile, "estimated_seconds": validation["estimatedCost"],
+            "estimated_memory_mb": 0, "execution_mode": "COPILOT", "risk": "MEDIUM",
+            "safety_status": "SAFE", "approval_required": True, "controlled_factors": [],
+            "status": "PREVIEW", "decision_source": source, "intent_source": source,
+            "policy_version": None, "proposal_source": "AGENT", "overlay": draft.overlay,
+        })
+        return {**validation, "proposal": proposal}
 
     def experiment_preview(self, research_id: str, proposal_id: str) -> dict:
         proposal = self._proposal(research_id, proposal_id)
         budget = self.research_get_budget(research_id)
-        code = proposal["fidelity"]
-        return {**proposal, "budget_remaining": budget["remaining"].get(code, 0),
+        time_ok = (budget["time_remaining"] is None or
+                   float(proposal.get("estimated_seconds") or 0) <= budget["time_remaining"])
+        return {**proposal, "budget_remaining": budget["remaining"]["total"],
+                "time_remaining": budget["time_remaining"],
                 "can_submit": proposal["safety_status"] != "REJECTED"
-                and budget["remaining"].get(code, 0) > 0}
+                and budget["remaining"]["total"] > 0 and time_ok}
 
     def experiment_submit(self, research_id: str, proposal_id: str) -> dict:
         return self.service.submit_proposal(research_id, proposal_id)
@@ -125,7 +128,8 @@ class ResearchTools:
             return {"status": item["status"], "compliance": None, "gray_ratio": None,
                     "connected_components": None, "volume_fraction": None,
                     "volume_error": None, "iterations": item.get("current_iteration", 0),
-                    "fidelity": item["fidelity"], "solver": None}
+                    "dimension": item.get("dimension"), "solver_profile": item.get("solver_profile"),
+                    "solver": None}
         result = item["result"]
         objective, constraints, quality, solver = (result.get(name, {}) for name in
                                                     ("objective", "constraints", "quality", "solver"))
@@ -136,7 +140,8 @@ class ResearchTools:
                 "gray_ratio": quality.get("gray_ratio"),
                 "connected_components": quality.get("connected_components"),
                 "volume_fraction": actual, "volume_error": volume_error,
-                "iterations": solver.get("iterations"), "fidelity": item["fidelity"],
+                "iterations": solver.get("iterations"), "dimension": item.get("dimension"),
+                "solver_profile": item.get("solver_profile"),
                 "solver": {key: value for key, value in solver.items() if key != "raw_output"}}
 
     def experiment_compare(self, research_id: str, a: str, b: str) -> dict:

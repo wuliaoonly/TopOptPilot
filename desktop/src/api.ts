@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { AppSettings, BackendInfo, EngineeringRun, GeometryPreview, KnowledgeEntry, Locale, MatlabHealth, Research, SettingsDiagnostics, SolverCapabilities, SubagentTask, SystemHealth } from "./types";
+import type { AppSettings, BackendInfo, EngineeringRun, Experiment, GeometryPreview, KnowledgeEntry, Locale, MatlabHealth, Research, SettingsDiagnostics, SolverCapabilities, SubagentTask, SystemHealth } from "./types";
+import type { AgentWorkflowItem, EngineeringChatRequest, EngineeringChatResponse, EngineeringComparisonSchemeCreate, ExperimentDraft, ExperimentDraftValidation, QuickAgentTask, Workspace, WorkspaceContextRef, WorkspaceConversationMessage, WorkspaceGrant } from "./generated/api-contract";
 
 let backend: BackendInfo | null = null;
 
@@ -21,6 +22,21 @@ export async function initializeBackend(): Promise<BackendInfo> {
 }
 
 function base(): string { if (!backend) throw new Error("Backend not initialized"); return `http://127.0.0.1:${backend.port}`; }
+function errorMessage(payload: unknown, fallback: string): string {
+  if (payload && typeof payload === "object") {
+    const envelope = payload as { message?: unknown; code?: unknown };
+    if (typeof envelope.message === "string") return envelope.message;
+    if (typeof envelope.code === "string") return envelope.code;
+  }
+  const detail = (payload as { detail?: unknown } | null)?.detail;
+  if (typeof detail === "string") return detail;
+  if (detail && typeof detail === "object") {
+    const value = detail as { message?: unknown; code?: unknown };
+    if (typeof value.message === "string") return value.message;
+    if (typeof value.code === "string") return value.code;
+  }
+  return fallback;
+}
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   await initializeBackend();
   let lastError: unknown;
@@ -30,7 +46,7 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
     try {
       const response = await fetch(base() + path, { ...init, headers: { "Content-Type": "application/json",
         "X-TopOptPilot-Token": backend!.token, ...(init.headers || {}) } });
-      if (!response.ok) throw new Error((await response.json().catch(() => ({}))).detail || response.statusText);
+      if (!response.ok) throw new Error(errorMessage(await response.json().catch(() => ({})), response.statusText));
       return response.json();
     } catch (reason) {
       lastError = reason;
@@ -44,7 +60,7 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
 async function download(path:string,filename:string):Promise<void>{
   await initializeBackend();
   const response=await fetch(base()+path,{headers:{"X-TopOptPilot-Token":backend!.token}});
-  if(!response.ok)throw new Error((await response.json().catch(()=>({}))).detail||response.statusText);
+  if(!response.ok)throw new Error(errorMessage(await response.json().catch(()=>({})),response.statusText));
   const url=URL.createObjectURL(await response.blob()),anchor=document.createElement("a");
   anchor.href=url;anchor.download=filename;document.body.appendChild(anchor);anchor.click();anchor.remove();
   setTimeout(()=>URL.revokeObjectURL(url),1000);
@@ -53,6 +69,7 @@ async function download(path:string,filename:string):Promise<void>{
 export const api = {
   projectPickFolder: () => invoke<string | null>("project_pick_folder"),
   projectOpen: (root: string) => invoke<import("./types").ProjectOpen>("project_open", { root }),
+  workspaceGrant: (root: string, workspaceId: string) => invoke<WorkspaceGrant>("workspace_grant", { root, workspaceId }),
   projectList: (root: string) => invoke<import("./types").ProjectEntry[]>("project_list", { root }),
   projectRead: (root: string, relativePath: string) => invoke<import("./types").ProjectFile>("project_read", { root, relativePath }),
   projectSave: (root: string, relativePath: string, content: string, expectedSha256?: string) => invoke<import("./types").ProjectFile>("project_save", { root, relativePath, content, expectedSha256 }),
@@ -62,17 +79,32 @@ export const api = {
   patchPreview: (root: string, proposal: import("./types").PatchProposal) => invoke<import("./types").PatchPreviewResult>("patch_preview", { root, proposal }),
   patchApply: (root: string, proposal: import("./types").PatchProposal, approvalToken: string) => invoke<import("./types").ProjectFile[]>("patch_apply", { root, proposal, approvalToken }),
   engineeringPatch: (data: object) => request<import("./types").PatchProposal>("/api/engineering/assistant/patch", { method: "POST", body: JSON.stringify(data) }),
-  engineeringChat: (data: object) => request<{reply: string; source: string; actions: Array<Record<string, unknown>>; contextDigest: string}>("/api/engineering/assistant/chat", { method: "POST", body: JSON.stringify(data) }),
+  engineeringChat: (data: EngineeringChatRequest) => request<EngineeringChatResponse>("/api/engineering/assistant/chat", { method: "POST", body: JSON.stringify(data) }),
+  engineeringGenerate: (instruction: string) => request<{generatedEntrypoint:string;generatedFiles:Record<string,string>}>("/api/engineering/assistant/generate", { method: "POST", body: JSON.stringify({ instruction }) }),
   health: () => request<SystemHealth>("/api/health"),
   listResearch: (archived = false) => request<Research[]>(`/api/research?archived=${archived ? "true" : "false"}`),
-  archiveResearch: (id: string) => request<Research>(`/api/research/${encodeURIComponent(id)}?confirm=true`, { method: "DELETE" }),
-  restoreResearch: (id: string) => request<Research>(`/api/research/${encodeURIComponent(id)}/restore`, { method: "POST" }),
+ archiveResearch: (id: string) => request<import("./generated/api-contract").ResearchArchiveResult<Research>>(`/api/research/${encodeURIComponent(id)}?confirm=true`, { method: "DELETE" }),
+  listWorkspaces: () => request<Workspace[]>("/api/workspaces"),
+  createWorkspace: (data: {projectId:string; name:string}) => request<Workspace>("/api/workspaces", {method:"POST",body:JSON.stringify(data)}),
+  workspaceContexts: (id:string, mode:"quick"|"deep") => request<WorkspaceContextRef[]>("/api/workspaces/" + encodeURIComponent(id) + "/contexts?mode=" + mode),
+  workspaceConversation: (id:string) => request<WorkspaceConversationMessage[]>("/api/workspaces/" + encodeURIComponent(id) + "/conversation"),
+  workspaceMessage: (id:string, data:{lane:"quick"|"deep"|"shared";role:"user"|"assistant"|"system";content:string;researchId?:string}) => request<WorkspaceConversationMessage>("/api/workspaces/" + encodeURIComponent(id) + "/conversation", {method:"POST",body:JSON.stringify(data)}),
+  workspaceWorkflow: (id:string) => request<AgentWorkflowItem[]>("/api/workspaces/" + encodeURIComponent(id) + "/workflow"),
+  quickAgentTask: (id:string,prompt:string) => request<QuickAgentTask>("/api/workspaces/" + encodeURIComponent(id) + "/quick-agent/tasks", {method:"POST",body:JSON.stringify({prompt})}),
+  cancelQuickAgentTask: (workspaceId:string,taskId:string) => request<QuickAgentTask>("/api/workspaces/" + encodeURIComponent(workspaceId) + "/quick-agent/tasks/" + encodeURIComponent(taskId) + "/cancel", {method:"POST"}),
+  workspaceStream: async (id:string): Promise<WebSocket> => {
+    if (!backend) throw new Error("Backend not initialized");
+    const ticket = await request<{ticket:string}>("/api/workspaces/" + encodeURIComponent(id) + "/stream-ticket", {method:"POST"});
+    return new WebSocket("ws://127.0.0.1:" + backend.port + "/api/workspaces/" + encodeURIComponent(id) + "/stream?ticket=" + encodeURIComponent(ticket.ticket));
+  },
+  validateExperimentDraft: (id:string,data:ExperimentDraft) => request<ExperimentDraftValidation>("/api/research/" + encodeURIComponent(id) + "/experiment-drafts/validate", {method:"POST",body:JSON.stringify(data)}),
+  createManualExperiment: (id:string,data:ExperimentDraft) => request<Experiment>("/api/research/" + encodeURIComponent(id) + "/experiments/manual", {method:"POST",body:JSON.stringify(data)}),
+  restoreResearch: (id: string) => request<import("./generated/api-contract").ResearchArchiveResult<Research>>(`/api/research/${encodeURIComponent(id)}/restore`, { method: "POST" }),
   getResearch: (id: string) => request<Research>(`/api/research/${id}`),
-  researchArtifacts: (id: string) => request<{researchId:string; experiments:Array<{experimentId:string; status:string; fidelity:string; backend:string; provenance:Record<string,string>; files:Array<{relativePath:string; sha256:string; mediaType:string; sizeBytes:number}>; metrics:Record<string,number|null>}>}>(`/api/research/${id}/artifacts`),
+  researchArtifacts: (id: string) => request<{researchId:string; experiments:Array<{experimentId:string; status:string; dimension:number; solverProfile:Record<string,unknown>; legacyFidelity?:string; backend:string; provenance:Record<string,string>; files:Array<{relativePath:string; sha256:string; mediaType:string; sizeBytes:number}>; metrics:Record<string,number|null>}>}>(`/api/research/${id}/artifacts`),
   researchPareto: (id: string) => request<Array<Record<string,unknown>>>(`/api/research/${id}/pareto`),
   researchCompare: (id: string, a: string, b: string) => request<Record<string,unknown>>(`/api/research/${id}/compare?a=${encodeURIComponent(a)}&b=${encodeURIComponent(b)}`),
-  researchFromEngineeringRun: (runId: string, data: object) => request<Research>(`/api/research/from-engineering-run/${encodeURIComponent(runId)}`, { method: "POST", body: JSON.stringify(data) }),
-  compare: (id:string,a:string,b:string) => request<Record<string,unknown>>(`/api/research/${id}/compare?a=${encodeURIComponent(a)}&b=${encodeURIComponent(b)}`),
+  researchFromEngineeringRun: (runId: string, data: object) => request<{researchId:string; snapshot:Record<string,unknown>; research:Research}>(`/api/research/from-engineering-run/${encodeURIComponent(runId)}`, { method: "POST", body: JSON.stringify(data) }),
   createResearch: (data: object) => request<Research>("/api/research", { method: "POST", body: JSON.stringify(data) }),
   previewGuide: (text:string,locale:Locale) => request<Record<string,any>>("/api/guide", {method:"POST",body:JSON.stringify({text,locale})}),
   guide: (id:string,text:string) => request<Record<string,any>>(`/api/research/${id}/guide`, {method:"POST",body:JSON.stringify({text})}),
@@ -106,13 +138,13 @@ export const api = {
   engineeringBundledRuntime: () => request<{state:string; root?:string; dllPath?:string; solverExecutable?:string; profileId:string|null; usable:boolean; diagnostic:string}>("/api/engineering/runtime/bundled"),
   engineeringRun: (data: object) => request<EngineeringRun>("/api/engineering/runs", { method: "POST", body: JSON.stringify(data) }),
   engineeringRunGet: (id: string) => request<EngineeringRun>(`/api/engineering/runs/${id}`),
-  engineeringComparisonSchemes: () => request<import("./types").EngineeringComparisonScheme[]>("/api/engineering/comparison-schemes"),
-  engineeringComparisonScheme: (id: string) => request<import("./types").EngineeringComparisonScheme>(`/api/engineering/comparison-schemes/${encodeURIComponent(id)}`),
-  engineeringComparisonSchemeCreate: (runId: string, name?: string) => request<import("./types").EngineeringComparisonScheme>("/api/engineering/comparison-schemes", { method: "POST", body: JSON.stringify({ runId, name }) }),
-  engineeringComparisonSchemeDelete: (id: string) => request<{deleted:boolean; id:string}>(`/api/engineering/comparison-schemes/${encodeURIComponent(id)}`, { method: "DELETE" }),
   engineeringCancel: (id: string) => request<EngineeringRun>(`/api/engineering/runs/${id}/cancel`, { method: "POST" }),
   engineeringEvents: (id: string) => request<{runId:string; events:Array<Record<string,unknown>>}>(`/api/engineering/runs/${id}/events`),
   engineeringReport: (id: string) => request<{relativePath:string; sha256:string; mediaType:string; sizeBytes:number}>(`/api/engineering/runs/${id}/report`, { method: "POST" }),
+  engineeringComparisonSchemes: () => request<import("./types").EngineeringComparisonScheme[]>("/api/engineering/comparison-schemes"),
+  engineeringComparisonScheme: (id: string) => request<import("./types").EngineeringComparisonScheme>(`/api/engineering/comparison-schemes/${encodeURIComponent(id)}`),
+  engineeringComparisonSchemeCreate: (data: EngineeringComparisonSchemeCreate) => request<import("./types").EngineeringComparisonScheme>("/api/engineering/comparison-schemes", { method: "POST", body: JSON.stringify(data) }),
+  engineeringComparisonSchemeDelete: (id: string) => request<{deleted:boolean; id:string}>(`/api/engineering/comparison-schemes/${encodeURIComponent(id)}`, { method: "DELETE" }),
   terminalStart: (data: object) => request<{sessionId:string; status:string}>("/api/engineering/terminal/start", { method: "POST", body: JSON.stringify(data) }),
   terminalCommand: (sessionId: string, command: string) => request<{queued:boolean; id:number; command:string}>(`/api/engineering/terminal/command?session_id=${encodeURIComponent(sessionId)}`, { method: "POST", body: JSON.stringify({ command }) }),
   terminalPoll: (sessionId: string) => request<{sessionId:string; status:string; results:Array<Record<string,unknown>>}>(`/api/engineering/terminal/${encodeURIComponent(sessionId)}`),
@@ -120,9 +152,10 @@ export const api = {
   webviewCreate: (url: string) => invoke<string>("webview_create", { url }),
   webviewNavigate: (url: string) => invoke<void>("webview_navigate", { url }),
   webviewClose: () => invoke<void>("webview_close"),
-  engineeringStream: (id: string, onEvent: (event: Record<string, unknown>) => void): WebSocket => {
+  engineeringStream: async (id: string, onEvent: (event: Record<string, unknown>) => void): Promise<WebSocket> => {
     if (!backend) throw new Error("Backend not initialized");
-    const socket = new WebSocket(`ws://127.0.0.1:${backend.port}/api/engineering/runs/${id}/stream?token=${encodeURIComponent(backend.token)}`);
+    const value = await request<{ticket:string}>(`/api/engineering/runs/${id}/stream-ticket`, {method:"POST"});
+    const socket = new WebSocket(`ws://127.0.0.1:${backend.port}/api/engineering/runs/${id}/stream?ticket=${encodeURIComponent(value.ticket)}`);
     socket.onmessage = message => { try { onEvent(JSON.parse(message.data)); } catch { /* ignore malformed event */ } };
     return socket;
   },
@@ -133,4 +166,58 @@ export const api = {
     const value = await request<{ticket:string}>(`/api/research/${id}/stream-ticket`, {method:"POST"});
     return new WebSocket(`ws://127.0.0.1:${backend.port}/api/research/${id}/stream?ticket=${encodeURIComponent(value.ticket)}`);
   }
+};
+
+// Functional ownership exports. `api` remains the one-release compatibility
+// aggregate while workspaces migrate to these narrower surfaces.
+export const systemApi = {
+  health: api.health, settings: api.settings, saveSettings: api.saveSettings,
+  setAgentKey: api.setAgentKey, deleteAgentKey: api.deleteAgentKey,
+  testAgent: api.testAgent, restartPi: api.restartPi,
+  matlabHealth: api.matlabHealth, restartMatlab: api.restartMatlab,
+  diagnostics: api.diagnostics, clearCache: api.clearCache,
+};
+
+export const projectApi = {
+  pickFolder: api.projectPickFolder, open: api.projectOpen, list: api.projectList,
+  read: api.projectRead, save: api.projectSave, create: api.projectCreate,
+  rename: api.projectRename, search: api.projectSearch,
+  patchPreview: api.patchPreview, patchApply: api.patchApply,
+  webviewCreate: api.webviewCreate, webviewNavigate: api.webviewNavigate,
+  webviewClose: api.webviewClose,
+};
+
+export const quickApi = {
+  health: api.engineeringHealth, installations: api.engineeringInstallations,
+  runtimeInstallations: api.engineeringRuntimeInstallations,
+  probe: api.engineeringProbe, preference: api.engineeringPreference,
+  runtimeProbe: api.engineeringRuntimeProbe, bundledRuntime: api.engineeringBundledRuntime,
+  run: api.engineeringRun, getRun: api.engineeringRunGet, cancel: api.engineeringCancel,
+  events: api.engineeringEvents, report: api.engineeringReport, stream: api.engineeringStream,
+  patch: api.engineeringPatch, generate: api.engineeringGenerate, chat: api.engineeringChat,
+  comparisonSchemes: api.engineeringComparisonSchemes,
+  comparisonScheme: api.engineeringComparisonScheme,
+  createComparisonScheme: api.engineeringComparisonSchemeCreate,
+  deleteComparisonScheme: api.engineeringComparisonSchemeDelete,
+  terminalStart: api.terminalStart, terminalCommand: api.terminalCommand,
+  terminalPoll: api.terminalPoll, terminalStop: api.terminalStop,
+  quickAgentTask: api.quickAgentTask, cancelQuickAgentTask: api.cancelQuickAgentTask,
+};
+
+export const deepApi = {
+  list: api.listResearch, get: api.getResearch, create: api.createResearch,
+  archive: api.archiveResearch, restore: api.restoreResearch,
+  promote: api.researchFromEngineeringRun, artifacts: api.researchArtifacts,
+  compare: api.researchCompare, pareto: api.researchPareto,
+  autonomous: api.autonomous, command: api.command, guide: api.guide,
+  approve: api.approve, reject: api.reject, editDecision: api.editDecision,
+  why: api.why, agentTasks: api.agentTasks, setLocale: api.setLocale,
+  stream: api.stream, downloadReport: api.downloadReport,
+  validateDraft: api.validateExperimentDraft, createManualExperiment: api.createManualExperiment,
+};
+
+export const workspaceApi = {
+  list: api.listWorkspaces, create: api.createWorkspace, contexts: api.workspaceContexts,
+  conversation: api.workspaceConversation, message: api.workspaceMessage, workflow: api.workspaceWorkflow,
+  stream: api.workspaceStream,
 };

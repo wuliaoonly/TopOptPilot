@@ -7,7 +7,7 @@ import { ConvergenceChart, ScalarMap } from "../engineering/ResultViewer";
 import { normalizeResearchField, normalizeResearchHistory } from "./research-result";
 import ResizableWorkspaceLayout from "../../components/ResizableWorkspaceLayout";
 
-type ArtifactIndex = { experiments: Array<{ experimentId: string; status: string; fidelity: string; backend: string; provenance: Record<string, string>; files: Array<{ relativePath: string; sizeBytes: number; sha256: string }>; metrics: Record<string, number | null> }> };
+type ArtifactIndex = { experiments: Array<{ experimentId: string; status: string; dimension: number; solverProfile: Record<string, unknown>; legacyFidelity?: string; backend: string; provenance: Record<string, string>; files: Array<{ relativePath: string; sizeBytes: number; sha256: string }>; metrics: Record<string, number | null> }> };
 type Props = {
   researches: Research[];
   selected: Research | null;
@@ -106,7 +106,6 @@ export default function ResearchWorkspace(props: Props) {
     } catch (reason) { onError(String(reason)); }
   }
 
-
   async function toggleTrash() {
     const next = !trashOpen;
     setTrashOpen(next);
@@ -115,7 +114,7 @@ export default function ResearchWorkspace(props: Props) {
     catch (reason) { onError(String(reason)); }
   }
   async function archive(item: Research) {
-    if (!window.confirm("将“" + item.name + "”移入回收站？科研证据和制品会保留。")) return;
+    if (!window.confirm(`将“${item.name}”移入回收站？科研证据和制品会保留。`)) return;
     await onArchive(item.id);
     try { setArchived(await api.listResearch(true)); }
     catch (reason) { onError(String(reason)); }
@@ -125,15 +124,15 @@ export default function ResearchWorkspace(props: Props) {
     setArchived(items => items.filter(value => value.id !== item.id));
   }
 
-  const leftPane = <><div className="v2-pane-title"><span>{trashOpen ? "回收站" : "Research"}</span><span className="count">{trashOpen ? archived.length : researches.length}</span><div className="research-list-actions"><button aria-label={trashOpen ? "返回 Research 列表" : "打开 Research 回收站"} title={trashOpen ? "返回 Research 列表" : "回收站"} onClick={() => void toggleTrash()}>{trashOpen ? <ChevronRight size={13}/> : <Trash2 size={13}/>}</button>{!trashOpen ? <button className="primary-button compact" onClick={onCreateResearch}><FlaskConical size={13}/>新建</button> : null}</div></div>
-    <div className="research-list">{(trashOpen ? archived : researches).map(item => <div className={"research-row-shell " + (selected?.id === item.id && !trashOpen ? "active" : "")} key={item.id}><button className="research-row research-select" disabled={trashOpen} onClick={() => void onSelect(item.id)}><FlaskConical size={15}/><span><b>{item.name}</b><small>{item.status} · {item.id}</small></span><ChevronRight size={14}/></button><button className="research-row-action" aria-label={(trashOpen ? "恢复" : "删除") + item.name} title={trashOpen ? "恢复 Research" : "移入回收站"} onClick={() => void (trashOpen ? restore(item) : archive(item))}>{trashOpen ? <ArchiveRestore size={14}/> : <Trash2 size={14}/>}</button></div>)}</div>
-    {!((trashOpen ? archived : researches).length) ? <div className="research-list-empty">{trashOpen ? "回收站为空" : "尚无 Research"}</div> : null}
-    <div className="research-evidence"><h4>证据索引</h4><p>Research State 是唯一权威来源。移入回收站不会删除实验、审批、报告或制品。</p><div className="budget-line"><span>预算</span><b>{selected?.budget_used ?? 0}/{selected?.budget_total ?? 0}</b></div></div></>;
-  const runningExperiment = experiments.find(item => ["RUNNING", "QUEUED"].includes(String(item.status).toUpperCase()));
+  const visibleResearches = trashOpen ? archived : researches;
+  const leftPane = <>
+    <div className="v2-pane-title"><span>{trashOpen ? "回收站" : "Research"}</span><span className="count">{visibleResearches.length}</span><div className="research-list-actions"><button aria-label={trashOpen ? "返回 Research 列表" : "打开 Research 回收站"} title={trashOpen ? "返回 Research 列表" : "回收站"} onClick={() => void toggleTrash()}>{trashOpen ? <ChevronRight size={13}/> : <Trash2 size={13}/>}</button>{!trashOpen ? <button className="primary-button compact" onClick={onCreateResearch}><FlaskConical size={13}/>新建</button> : null}</div></div>
+    <div className="research-list">{visibleResearches.map(item => <div className={`research-row-shell ${selected?.id === item.id && !trashOpen ? "active" : ""}`} key={item.id}><button className="research-row research-select" disabled={trashOpen} onClick={() => void onSelect(item.id)}><FlaskConical size={15}/><span><b>{item.name}</b><small>{item.status} · {item.id}</small></span><ChevronRight size={14}/></button><button className="research-row-action" aria-label={`${trashOpen ? "恢复" : "删除"}${item.name}`} title={trashOpen ? "恢复 Research" : "移入回收站"} onClick={() => void (trashOpen ? restore(item) : archive(item))}>{trashOpen ? <ArchiveRestore size={14}/> : <Trash2 size={14}/>}</button></div>)}</div>
+    {!visibleResearches.length ? <div className="research-list-empty">{trashOpen ? "回收站为空" : "尚无 Research"}</div> : null}
+    <div className="research-evidence"><h4>证据索引</h4><p>Research State 是唯一权威来源。移入回收站不会删除实验、审批、报告或制品。</p><div className="budget-line"><span>预算</span><b>{selected?.budget_used ?? 0}/{selected?.budget_total ?? 0}</b></div></div>
+  </>;
 
   return <ResizableWorkspaceLayout mode="research"
-    activitySignal={runningExperiment ? `research-${selected?.id || "none"}-${runningExperiment.id}` : ""}
-    leftRail={<div className="left-rail-icons"><button aria-label="研究项目" title="研究项目"><FlaskConical size={15}/></button><button aria-label="实验与证据" title="实验与证据"><FileJson2 size={15}/></button><button aria-label="科研审批" title="科研审批"><ShieldCheck size={15}/></button></div>}
     left={leftPane}
     center={<section className="v2-center research-center"><div className="research-header"><div><span className="eyebrow">AI SCIENTIST WORKSPACE</span><h1>{selected?.name || "选择一个 Research"}</h1><p>{selected?.goal || "研究时间线、审批卡与可复现实验制品"}</p></div><div className="research-header-actions"><span className={`agent-mode ${safeMode ? "safe" : "online"}`}>{safeMode ? "规则 Safe Mode" : "Pi / Qwen"}</span><button className="primary-button" disabled={!selected || autonomousBusy} onClick={() => void autonomous()}>{autonomousBusy ? <LoaderCircle className="spin"/> : <Play size={14}/>}运行自主研究</button></div></div>
       <div className="stream-strip"><i className="connection-dot"/>{agentEvent}</div>

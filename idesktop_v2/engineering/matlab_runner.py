@@ -46,8 +46,8 @@ def build_engineering_matlab_config(task: dict[str, Any]) -> dict[str, Any]:
     if dimension not in {"2d", "3d"}:
         raise ValueError("task.dimension 仅支持 2d 或 3d")
     return {
-        "solver_dimension": dimension,
         "bc_type": load_case,
+        "solver_dimension": dimension,
         "nelx": int(geometry.get("nelx", params.get("nelx", 24))),
         "nely": int(geometry.get("nely", params.get("nely", 12))),
         "nelz": 1 if dimension == "2d" else int(geometry.get("nelz", params.get("nelz", 4))),
@@ -65,10 +65,11 @@ def build_engineering_matlab_config(task: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def build_matlab_batch_expression(config_path: Path, output_dir: Path) -> str:
+def build_matlab_batch_expression(config_path: Path, output_dir: Path,
+                                  entrypoint: str = "run_topopt_job") -> str:
     config = _matlab_quote(config_path)
     output = _matlab_quote(output_dir)
-    return f"run_topopt_job('{config}','{output}');"
+    return f"{entrypoint}('{config}','{output}');"
 
 
 def build_runtime_command(executable: Path, config_path: Path, output_dir: Path) -> list[str]:
@@ -158,19 +159,16 @@ def publish_manifest_progress(
         return
     if not isinstance(manifest, dict):
         return
+    raw_shape = manifest.get("shape")
+    shape = raw_shape if isinstance(raw_shape, list) and len(raw_shape) in {2, 3} else None
+    if shape is not None and any(isinstance(value, bool) or not isinstance(value, int) or value < 1 for value in shape):
+        shape = None
+    snapshot_root = output_dir / "snapshots"
     frames = manifest.get("frames", [])
     if isinstance(frames, dict):
         frames = [frames]
     if not isinstance(frames, list):
         return
-    raw_shape = manifest.get("shape")
-    shape = raw_shape if isinstance(raw_shape, list) and len(raw_shape) in {2, 3} else None
-    if shape is not None and any(
-        isinstance(value, bool) or not isinstance(value, int) or value < 1
-        for value in shape
-    ):
-        shape = None
-    snapshot_root = output_dir / "snapshots"
 
     high_water = max(seen_iterations, default=0)
     pending: list[tuple[int, dict[str, Any]]] = []
@@ -190,12 +188,14 @@ def publish_manifest_progress(
         volume_fraction = _finite_number(frame.get("volume_fraction"))
         if compliance is None or volume_fraction is None:
             continue
-        density_path = _snapshot_relative_path(snapshot_root, frame.get("density_file"))
-        stress_path = _snapshot_relative_path(snapshot_root, frame.get("stress_file"))
         state = {
             "compliance": compliance,
             "volume_fraction": volume_fraction,
         }
+        if "gray_ratio" in frame:
+            state["gray_ratio"] = _finite_number(frame.get("gray_ratio"))
+        density_path = _snapshot_relative_path(snapshot_root, frame.get("density_file"))
+        stress_path = _snapshot_relative_path(snapshot_root, frame.get("stress_file"))
         if density_path is not None and shape is not None:
             state["snapshot"] = {
                 "densityPath": density_path,
@@ -205,8 +205,6 @@ def publish_manifest_progress(
                 "order": manifest.get("order", "F"),
                 "dimension": manifest.get("dimension", "3d" if len(shape) == 3 else "2d"),
             }
-        if "gray_ratio" in frame:
-            state["gray_ratio"] = _finite_number(frame.get("gray_ratio"))
         pending.append((iteration, state))
 
     for iteration, state in sorted(pending, key=lambda item: item[0]):
@@ -225,6 +223,8 @@ def run_matlab_batch(
     output_dir: Path,
     *,
     source_root: Path,
+    source_overlay: Path | None = None,
+    entrypoint: str = "run_topopt_job",
     cancel=None,
     timeout_seconds: float | None = None,
     progress: Callable[[int, dict[str, Any]], None] | None = None,
@@ -242,8 +242,11 @@ def run_matlab_batch(
     config_path = output_dir / "config.json"
     matlab_config = build_engineering_matlab_config(task)
     config_path.write_text(json.dumps(matlab_config, ensure_ascii=False, indent=2), encoding="utf-8")
-    expression = build_matlab_batch_expression(config_path, output_dir)
-    command = [str(executable), "-wait", "-batch", f"addpath('{_matlab_quote(source_root)}'); {expression}"]
+    expression = build_matlab_batch_expression(config_path, output_dir, entrypoint)
+    paths = f"addpath('{_matlab_quote(source_root)}');"
+    if source_overlay is not None:
+        paths += f" addpath('{_matlab_quote(source_overlay)}');"
+    command = [str(executable), "-wait", "-batch", f"{paths} {expression}"]
     started = time.monotonic()
     process = subprocess.Popen(command, cwd=output_dir, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     output_queue: queue.Queue[str | None] = queue.Queue()
@@ -284,9 +287,7 @@ def run_matlab_batch(
         summary["status"] = "completed"
         dimension = matlab_config["solver_dimension"]
         summary["provenance"] = {
-            "resultKind": "solver",
-            "backend": "local-matlab",
-            "lane": "local-matlab",
+            "resultKind": "solver", "backend": "local-matlab", "lane": "local-matlab",
             "solverDimension": dimension,
             "solverEntry": "TopOpt_2D/topopt_main.m" if dimension == "2d" else "TopOpt-3D/topopt3d_main.m",
         }

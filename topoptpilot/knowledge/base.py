@@ -13,7 +13,7 @@ MANIFEST = {
     "solver-parameters": ("求解器", ["penal", "rmin", "beta", "网格", "MATLAB"]),
     "failure-patterns": ("失败诊断", ["断连", "棋盘格", "灰度", "不收敛", "基础设施"]),
     "controlled-comparisons": ("科研方法", ["假设", "对照实验", "因果", "证据"]),
-    "matlab-mcp-safety": ("工具", ["MATLAB MCP", "审批", "安全", "F3"]),
+    "matlab-mcp-safety": ("工具", ["MATLAB MCP", "COPILOT", "审批", "安全"]),
     "reporting-rules": ("报告", ["报告", "复现", "证据", "缺失值"]),
 }
 

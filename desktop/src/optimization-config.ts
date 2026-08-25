@@ -51,7 +51,7 @@ export function validateOptimizationConfig(config: OptimizationConfig): string[]
   return errors;
 }
 
-export function engineeringTaskFromConfig(config: OptimizationConfig) {
+export function engineeringTaskFromConfig(config: OptimizationConfig): import("./generated/api-contract").EngineeringTask {
   return {
     task_id: "idesktop-v2-ui",
     dimension: config.dimension,

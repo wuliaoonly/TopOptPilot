@@ -95,7 +95,12 @@ def test_run_stream_replays_progress_events(monkeypatch, tmp_path) -> None:
     # The non-WebSocket event endpoint is intentionally a deterministic replay helper for CLI clients.
     events = client.get(f"/api/engineering/runs/{run_id}/events")
     assert events.status_code == 200
-    assert any(item["type"] == "progress" for item in events.json()["events"])
+    replay = events.json()["events"]
+    assert any(item["type"] == "progress" for item in replay)
+    assert all({"eventId", "source", "timestamp", "ownerType", "ownerId", "payload"} <= set(item)
+               for item in replay)
+    assert all(item["ownerType"] == "engineering_run" and item["ownerId"] == run_id
+               for item in replay)
 
 
 def test_local_matlab_lane_fails_with_infrastructure_evidence_when_unavailable(monkeypatch, tmp_path) -> None:
@@ -127,6 +132,7 @@ def test_engineering_artifact_download_is_allowlisted(monkeypatch, tmp_path) -> 
     assert client.get(f"/api/engineering/runs/{created['runId']}/files/{relative}").status_code == 200
     assert client.get(f"/api/engineering/runs/{created['runId']}/files/../result.json").status_code in {400, 404}
 
+
 def test_engineering_run_rejects_invalid_complete_parameter_configuration() -> None:
     client = TestClient(app)
     response = client.post(
@@ -138,7 +144,8 @@ def test_engineering_run_rejects_invalid_complete_parameter_configuration() -> N
                 "task_id": "invalid-config",
                 "load_case": "unsupported",
                 "geometry": {"nelx": 0, "nely": 8, "nelz": 6},
-                "params": {"volfrac": 1.2, "penal": 0, "rmin": 0, "max_iter": 5, "min_iter": 10, "filter_strategy": "unknown", "accuracy": "ultra"},
+                "params": {"volfrac": 1.2, "penal": 0, "rmin": 0, "max_iter": 5,
+                           "min_iter": 10, "filter_strategy": "unknown", "accuracy": "ultra"},
             },
         },
     )

@@ -8,13 +8,15 @@ from fastapi import APIRouter, HTTPException
 
 from agent.llm.client import PiAgentClient
 from idesktop_v2.assistant.patches import (
-    EngineeringChatRequest,
-    EngineeringChatResponse,
-    generate_engineering_chat,
     EngineeringPatchRequest,
+    EngineeringGenerateRequest,
+    EngineeringGenerateResponse,
     PatchProposalResponse,
     generate_patch_proposal,
+    generate_quick_source,
+    generate_engineering_chat,
 )
+from topoptpilot.schemas.api_contracts import EngineeringChatRequest, EngineeringChatResponse
 from topoptpilot.api.fastapi_app import service
 
 
@@ -36,14 +38,25 @@ def _model_chat(messages: list[dict[str, Any]]) -> dict[str, Any]:
 @router.post("/chat", response_model=EngineeringChatResponse)
 def engineering_chat(request: EngineeringChatRequest) -> EngineeringChatResponse:
     try:
-        configured = bool(service.get_settings().get("api_key_status") not in {"not_configured", "environment_missing"})
-        return generate_engineering_chat(request, _model_chat, configured=configured)
+        configured = service.get_settings().get("api_key_status") not in {
+            "not_configured", "environment_missing",
+        }
+        return generate_engineering_chat(request, _model_chat, configured=bool(configured))
     except PermissionError as exc:
-        raise HTTPException(status_code=403, detail=str(exc)) from exc
+        raise HTTPException(status_code=403, detail={
+            "code": "ENGINEERING_SOURCE_CONSENT_REQUIRED", "message": str(exc),
+            "source": "AGENT", "retryable": False, "detail": {},
+        }) from exc
     except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
+        raise HTTPException(status_code=422, detail={
+            "code": "ENGINEERING_CHAT_INVALID", "message": str(exc),
+            "source": "AGENT", "retryable": False, "detail": {},
+        }) from exc
     except RuntimeError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+        raise HTTPException(status_code=503, detail={
+            "code": "ENGINEERING_AGENT_UNAVAILABLE", "message": str(exc),
+            "source": "AGENT", "retryable": True, "detail": {},
+        }) from exc
 
 
 @router.post("/patch", response_model=PatchProposalResponse)
@@ -52,6 +65,16 @@ def engineering_patch(request: EngineeringPatchRequest) -> PatchProposalResponse
         return generate_patch_proposal(request, _model_chat)
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@router.post("/generate", response_model=EngineeringGenerateResponse)
+def engineering_generate(request: EngineeringGenerateRequest) -> EngineeringGenerateResponse:
+    try:
+        return generate_quick_source(request, _model_chat)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except RuntimeError as exc:

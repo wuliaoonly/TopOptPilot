@@ -3,6 +3,7 @@ import { Boxes, LoaderCircle, Settings2, ShieldCheck } from "lucide-react";
 import { api, initializeBackend } from "./api";
 import EngineeringWorkspace from "./features/engineering/EngineeringWorkspace";
 import ResearchWorkspace from "./features/research/ResearchWorkspace";
+import UnifiedOptimizationWorkspace from "./features/UnifiedOptimizationWorkspace";
 import SettingsWorkspace from "./SettingsWorkspace";
 import type { AppSettings, EngineeringRun, Experiment, Research } from "./types";
 import type { WorkspaceMode } from "./workspace";
@@ -61,17 +62,18 @@ export default function V2App() {
 
   const createResearchFromRun = useCallback(async (run: EngineeringRun) => {
     const payload = buildResearchBaselineRequest(run, settings?.new_research.budget_total ?? 12);
-    const created = await api.researchFromEngineeringRun(run.runId, payload);
+    const promoted = await api.researchFromEngineeringRun(run.runId, payload);
+    const created = promoted.research;
     setResearches(items => [created, ...items.filter(item => item.id !== created.id)]);
     setSelectedResearch(created);
     setSelectedExperiment(null);
     setMode("research");
   }, [settings?.new_research.budget_total]);
 
-  async function createResearch() {
+  async function createResearch(workspaceId?: string) {
     try {
       const defaults = settings?.new_research;
-      const created = await api.createResearch({ name: "新拓扑研究", goal: "验证工程基线与科研策略的差异", budget_total: defaults?.budget_total ?? 12, mode: defaults?.mode ?? "COPILOT", constraints: defaults?.constraints ?? {} });
+      const created = await api.createResearch({ name: "新拓扑研究", goal: "验证工程基线与科研策略的差异", budget_total: defaults?.budget_total ?? 12, mode: defaults?.mode ?? "COPILOT", constraints: defaults?.constraints ?? {}, workspaceId });
       setResearches(items => [created, ...items]); setSelectedResearch(created); setSelectedExperiment(null); setMode("research");
     } catch (reason) { reportError(String(reason)); }
   }
@@ -86,35 +88,36 @@ export default function V2App() {
     try { action === "approve" ? await api.approve(id) : await api.reject(id); if (selectedResearch) await refreshSelected(selectedResearch.id); }
     catch (reason) { reportError(String(reason)); }
   }
-
   async function archiveResearch(id: string) {
     try {
       await api.archiveResearch(id);
       const remaining = researches.filter(item => item.id !== id);
       setResearches(remaining);
       if (selectedResearch?.id === id) {
+        setSelectedResearch(remaining[0] || null);
         setSelectedExperiment(null);
-        setSelectedResearch(remaining[0] ? await api.getResearch(remaining[0].id) : null);
       }
     } catch (reason) { reportError(String(reason)); }
   }
   async function restoreResearch(id: string) {
     try {
-      const restored = await api.restoreResearch(id);
+      const result = await api.restoreResearch(id);
+      const restored = result.research;
       setResearches(items => [restored, ...items.filter(item => item.id !== restored.id)]);
     } catch (reason) { reportError(String(reason)); }
   }
-  const workspace = useMemo(() => mode === "engineering"
-    ? <EngineeringWorkspace health={health} onError={reportError} onResearchBaseline={createResearchFromRun} researches={researches} selectedResearch={selectedResearch} onCreateResearch={createResearch} onSelectResearch={refreshSelected}/>
-    : <ResearchWorkspace researches={researches} selected={selectedResearch} active={active} command={command} busy={busy} safeMode={safeMode} onCommand={runResearchCommand} onCreateResearch={createResearch} onArchive={archiveResearch} onRestore={restoreResearch} onDecision={decide} onError={reportError} onSelect={refreshSelected} onSelectExperiment={setSelectedExperiment} setCommand={setCommand}/>,
-    [mode, health, reportError, createResearchFromRun, researches, selectedResearch, active, command, busy, safeMode, refreshSelected]);
+  const workspace = useMemo(() => <UnifiedOptimizationWorkspace
+    mode={mode} researches={researches} selectedResearch={selectedResearch}
+    selectedExperiment={selectedExperiment} onSelectResearch={refreshSelected}
+    onSelectExperiment={setSelectedExperiment} onCreateResearch={createResearch} onError={reportError}/>,
+    [mode, researches, selectedResearch, selectedExperiment, refreshSelected, reportError]);
 
-  if (!ready) return <div className="v2-boot"><LoaderCircle className="spin" size={28}/><b>正在启动 iDeskTop v2</b><span>{error || "连接统一 sidecar…"}</span></div>;
+  if (!ready) return <div className="v2-boot"><LoaderCircle className="spin" size={28}/><b>正在启动 TopOptPilot</b><span>{error || "连接统一 sidecar…"}</span></div>;
   if (settingsOpen && settings) return <SettingsWorkspace settings={settings} onClose={() => setSettingsOpen(false)} onSaved={value => { setSettings(value); document.documentElement.lang = value.locale; document.documentElement.dataset.density = value.ui_density; }}/>
   return <div className="v2-shell">
     <header className="v2-titlebar" data-tauri-drag-region>
-      <div className="v2-brand"><span className="v2-brand-mark"><Boxes size={18}/></span><div><b>iDeskTop</b><small>V2 · TOPOLOGY WORKBENCH</small></div></div>
-      <nav className="v2-workspaces" aria-label="工作区">{(["engineering", "research"] as WorkspaceMode[]).map(item => <button key={item} title={item === "engineering" ? "工程开发" : "AI 科研"} className={mode === item ? "active" : ""} onClick={() => setMode(item)}><span className="workspace-dot" data-mode={item}/>{workspaceLabel(item)}</button>)}</nav>
+      <div className="v2-brand"><span className="v2-brand-mark"><Boxes size={18}/></span><div><b>TopOptPilot</b><small>V6.3 · TOPOLOGY WORKBENCH</small></div></div>
+      <nav className="v2-workspaces" aria-label="工作区">{(["engineering", "research"] as WorkspaceMode[]).map(item => <button key={item} className={mode === item ? "active" : ""} onClick={() => setMode(item)}><span className="workspace-dot" data-mode={item}/>{workspaceLabel(item)}</button>)}</nav>
       <div className="v2-actions"><span className="connection"><i/>SIDECAR {health?.version || ""}</span><button title="设置" aria-label="打开设置" onClick={() => setSettingsOpen(true)}><Settings2 size={16}/></button></div>
     </header>
     {error ? <div className="v2-error"><ShieldCheck size={15}/>{error}<button aria-label="关闭错误" onClick={() => setError("")}>×</button></div> : null}

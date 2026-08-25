@@ -30,12 +30,8 @@ def _atomic_json(path: Path, value: dict[str, Any]) -> None:
 
 
 def _validate_queue_backend(backend: str) -> None:
-    if backend == "simulate":
-        raise ValueError("backend=simulate is forbidden for the formal experiment queue")
     if backend not in {"python", "python3d"}:
-        raise ValueError(
-            f"backend={backend} is not allowed in the formal experiment queue"
-        )
+        raise ValueError(f"backend={backend} is not allowed in the Python regression queue")
 
 
 def _run_solver(task: dict[str, Any], backend: str, progress_path: str) -> dict[str, Any]:

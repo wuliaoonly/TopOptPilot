@@ -58,7 +58,8 @@ class ResearchStateStore:
                     current_iteration INTEGER NOT NULL DEFAULT 0,
                     run_id TEXT, safety TEXT NOT NULL DEFAULT 'LOW',
                     result_json TEXT, error TEXT, created_at TEXT NOT NULL,
-                    started_at TEXT, completed_at TEXT, requires_approval INTEGER NOT NULL DEFAULT 0,
+                    started_at TEXT, completed_at TEXT,
+                    requires_approval INTEGER NOT NULL DEFAULT 0,
                     FOREIGN KEY(research_id) REFERENCES research(id)
                 );
                 CREATE TABLE IF NOT EXISTS events (
@@ -126,6 +127,37 @@ class ResearchStateStore:
                 CREATE INDEX IF NOT EXISTS idx_subagent_research ON subagent_tasks(research_id, created_at);
                 CREATE INDEX IF NOT EXISTS idx_hypothesis_research ON hypotheses(research_id, round_number);
                 CREATE INDEX IF NOT EXISTS idx_artifact_research ON artifact_lineage(research_id, experiment_id);
+                CREATE TABLE IF NOT EXISTS workspaces (
+                    id TEXT PRIMARY KEY, project_id TEXT NOT NULL UNIQUE, name TEXT NOT NULL,
+                    read_only INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS workspace_conversations (
+                    id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, lane TEXT NOT NULL,
+                    role TEXT NOT NULL, content TEXT NOT NULL, research_id TEXT,
+                    created_at TEXT NOT NULL, FOREIGN KEY(workspace_id) REFERENCES workspaces(id)
+                );
+                CREATE TABLE IF NOT EXISTS workflow_items (
+                    id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, lane TEXT NOT NULL,
+                    owner_type TEXT NOT NULL, owner_id TEXT NOT NULL, actor_type TEXT NOT NULL,
+                    actor_role TEXT NOT NULL, phase TEXT NOT NULL, status TEXT NOT NULL,
+                    title TEXT NOT NULL, summary TEXT NOT NULL, related_run_id TEXT,
+                    experiment_id TEXT, proposal_id TEXT, task_id TEXT, evidence_ids_json TEXT NOT NULL DEFAULT '[]',
+                    requires_human_action INTEGER NOT NULL DEFAULT 0, sanitized_tool_call_json TEXT,
+                    error TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                    FOREIGN KEY(workspace_id) REFERENCES workspaces(id)
+                );
+                CREATE TABLE IF NOT EXISTS quick_agent_sessions (
+                    workspace_id TEXT PRIMARY KEY, status TEXT NOT NULL DEFAULT 'idle', updated_at TEXT NOT NULL,
+                    FOREIGN KEY(workspace_id) REFERENCES workspaces(id)
+                );
+                CREATE TABLE IF NOT EXISTS quick_agent_tasks (
+                    id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, status TEXT NOT NULL, round INTEGER NOT NULL,
+                    prompt TEXT NOT NULL, result_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL, FOREIGN KEY(workspace_id) REFERENCES workspaces(id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_workspace_message ON workspace_conversations(workspace_id, created_at);
+                CREATE INDEX IF NOT EXISTS idx_workspace_workflow ON workflow_items(workspace_id, updated_at);
+                CREATE INDEX IF NOT EXISTS idx_quick_task_workspace ON quick_agent_tasks(workspace_id, created_at);
             """)
             self._ensure_columns(db, "research", {
                 "budgets_json": "TEXT NOT NULL DEFAULT '{}'",
@@ -141,8 +173,15 @@ class ResearchStateStore:
                 "defaults_json": "TEXT NOT NULL DEFAULT '{}'",
                 "contract_json": "TEXT NOT NULL DEFAULT '{}'",
                 "archived_at": "TEXT",
+                "workspace_id": "TEXT",
             })
             self._ensure_columns(db, "experiments", {
+                "dimension": "INTEGER NOT NULL DEFAULT 2",
+                "solver_profile_json": "TEXT NOT NULL DEFAULT '{}'",
+                "estimated_seconds": "REAL NOT NULL DEFAULT 0",
+                "estimated_memory_mb": "REAL NOT NULL DEFAULT 0",
+                "execution_mode": "TEXT NOT NULL DEFAULT 'COPILOT'",
+                "legacy_fidelity": "TEXT",
                 "proposal_id": "TEXT",
                 "intent": "TEXT NOT NULL DEFAULT 'MANUAL'",
                 "cached": "INTEGER NOT NULL DEFAULT 0",
@@ -164,6 +203,7 @@ class ResearchStateStore:
                 "review_verdict": "TEXT",
                 "human_decision": "TEXT",
                 "requires_approval": "INTEGER NOT NULL DEFAULT 0",
+                "overlay_json": "TEXT NOT NULL DEFAULT '{}'",
             })
             self._ensure_columns(db, "events", {
                 "event_id": "TEXT",
@@ -175,6 +215,11 @@ class ResearchStateStore:
                 "evidence_ids_json": "TEXT NOT NULL DEFAULT '[]'",
             })
             self._ensure_columns(db, "proposals", {
+                "dimension": "INTEGER NOT NULL DEFAULT 2",
+                "solver_profile_json": "TEXT NOT NULL DEFAULT '{}'",
+                "estimated_seconds": "REAL NOT NULL DEFAULT 0",
+                "estimated_memory_mb": "REAL NOT NULL DEFAULT 0",
+                "execution_mode": "TEXT NOT NULL DEFAULT 'COPILOT'",
                 "decision_source": "TEXT NOT NULL DEFAULT 'HUMAN'",
                 "intent_source": "TEXT NOT NULL DEFAULT 'HUMAN'",
                 "policy_version": "TEXT NOT NULL DEFAULT 'v6-intent-compiler-1'",
@@ -182,11 +227,19 @@ class ResearchStateStore:
                 "provider": "TEXT",
                 "session_id": "TEXT",
                 "evidence_ids_json": "TEXT NOT NULL DEFAULT '[]'",
+                "proposal_source": "TEXT NOT NULL DEFAULT 'LEGACY_POLICY'",
+                "overlay_json": "TEXT NOT NULL DEFAULT '{}'",
             })
             self._ensure_columns(db, "agent_sessions", {
                 "stream_text": "TEXT NOT NULL DEFAULT ''",
                 "last_error": "TEXT",
             })
+            # Preserve pre-direct-solver records without letting their former
+            # level participate in new Policy decisions or public presentation.
+            db.execute("""UPDATE experiments
+                          SET legacy_fidelity=fidelity,
+                              dimension=CASE WHEN fidelity LIKE 'F2%' OR fidelity LIKE 'F3%' THEN 3 ELSE 2 END
+                          WHERE fidelity <> 'DIRECT' AND legacy_fidelity IS NULL""")
 
     @staticmethod
     def _ensure_columns(db: sqlite3.Connection, table: str, columns: dict[str, str]) -> None:
@@ -207,6 +260,132 @@ class ResearchStateStore:
             value["requires_approval"] = bool(value["requires_approval"])
         return value
 
+    # Workspace data is deliberately persisted with the authoritative research
+    # state: it keeps quick and deep UI recovery atomic at the user-data root.
+    # Signed directory grants are never stored here.
+    def create_workspace(self, data: dict[str, Any]) -> dict:
+        now = utc_now()
+        with self._lock, self.connection() as db:
+            db.execute("""INSERT INTO workspaces (id,project_id,name,read_only,created_at,updated_at)
+                VALUES (?,?,?,?,?,?)""", (data["id"], data["project_id"], data["name"],
+                int(bool(data.get("read_only", False))), now, now))
+        return self.get_workspace(data["id"])
+
+    def get_workspace(self, workspace_id: str) -> dict | None:
+        with self.connection() as db:
+            row = db.execute("SELECT * FROM workspaces WHERE id=?", (workspace_id,)).fetchone()
+        value = dict(row) if row else None
+        if value is not None:
+            value["read_only"] = bool(value["read_only"])
+        return value
+
+    def list_workspaces(self) -> list[dict]:
+        with self.connection() as db:
+            rows = db.execute("SELECT * FROM workspaces ORDER BY updated_at DESC").fetchall()
+        return [{**dict(row), "read_only": bool(row["read_only"])} for row in rows]
+
+    def update_workspace(self, workspace_id: str, **fields: Any) -> dict:
+        allowed = {"name", "read_only"}
+        assignments, values = [], []
+        for name, value in fields.items():
+            if name in allowed:
+                assignments.append(f"{name}=?")
+                values.append(int(value) if name == "read_only" else value)
+        if assignments:
+            assignments.append("updated_at=?")
+            values.extend((utc_now(), workspace_id))
+            with self._lock, self.connection() as db:
+                db.execute(f"UPDATE workspaces SET {', '.join(assignments)} WHERE id=?", values)
+        return self.get_workspace(workspace_id)
+
+    def add_workspace_message(self, data: dict[str, Any]) -> dict:
+        with self._lock, self.connection() as db:
+            db.execute("""INSERT INTO workspace_conversations
+                (id,workspace_id,lane,role,content,research_id,created_at) VALUES (?,?,?,?,?,?,?)""",
+                (data["id"], data["workspace_id"], data["lane"], data["role"], data["content"],
+                 data.get("research_id"), utc_now()))
+        return self.list_workspace_messages(data["workspace_id"], limit=1)[-1]
+
+    def list_workspace_messages(self, workspace_id: str, *, limit: int = 200) -> list[dict]:
+        with self.connection() as db:
+            rows = db.execute("""SELECT * FROM workspace_conversations WHERE workspace_id=?
+                ORDER BY created_at DESC LIMIT ?""", (workspace_id, limit)).fetchall()
+        return [dict(row) for row in reversed(rows)]
+
+    def add_workflow_item(self, data: dict[str, Any]) -> dict:
+        now = utc_now()
+        with self._lock, self.connection() as db:
+            db.execute("""INSERT INTO workflow_items
+              (id,workspace_id,lane,owner_type,owner_id,actor_type,actor_role,phase,status,title,summary,
+               related_run_id,experiment_id,proposal_id,task_id,evidence_ids_json,requires_human_action,
+               sanitized_tool_call_json,error,created_at,updated_at)
+              VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+              (data["id"], data["workspace_id"], data["lane"], data["owner_type"], data["owner_id"],
+               data.get("actor_type", "agent"), data.get("actor_role", "SYSTEM"), data["phase"],
+               data["status"], data["title"], data.get("summary", ""), data.get("related_run_id"),
+               data.get("experiment_id"), data.get("proposal_id"), data.get("task_id"),
+               json.dumps(data.get("evidence_ids", [])), int(bool(data.get("requires_human_action", False))),
+               json.dumps(data["sanitized_tool_call"]) if data.get("sanitized_tool_call") else None,
+               data.get("error"), now, now))
+        return self.list_workflow_items(data["workspace_id"], limit=1)[-1]
+
+    def list_workflow_items(self, workspace_id: str, *, limit: int = 300) -> list[dict]:
+        with self.connection() as db:
+            rows = db.execute("""SELECT * FROM workflow_items WHERE workspace_id=?
+                ORDER BY updated_at DESC LIMIT ?""", (workspace_id, limit)).fetchall()
+        items = []
+        for row in reversed(rows):
+            value = dict(row)
+            value["evidence_ids"] = json.loads(value.pop("evidence_ids_json") or "[]")
+            raw = value.pop("sanitized_tool_call_json")
+            value["sanitized_tool_call"] = json.loads(raw) if raw else None
+            value["requires_human_action"] = bool(value["requires_human_action"])
+            items.append(value)
+        return items
+
+    def upsert_quick_agent_session(self, workspace_id: str, status: str = "idle") -> dict:
+        now = utc_now()
+        with self._lock, self.connection() as db:
+            db.execute("""INSERT INTO quick_agent_sessions (workspace_id,status,updated_at) VALUES (?,?,?)
+                ON CONFLICT(workspace_id) DO UPDATE SET status=excluded.status,updated_at=excluded.updated_at""",
+                (workspace_id, status, now))
+        with self.connection() as db:
+            row = db.execute("SELECT * FROM quick_agent_sessions WHERE workspace_id=?", (workspace_id,)).fetchone()
+        return dict(row)
+
+    def create_quick_agent_task(self, data: dict[str, Any]) -> dict:
+        now = utc_now()
+        with self._lock, self.connection() as db:
+            db.execute("""INSERT INTO quick_agent_tasks (id,workspace_id,status,round,prompt,result_json,created_at,updated_at)
+                VALUES (?,?,?,?,?,?,?,?)""", (data["id"], data["workspace_id"], data["status"],
+                data.get("round", 1), data["prompt"], json.dumps(data.get("result", {})), now, now))
+        return self.get_quick_agent_task(data["id"])
+
+    def get_quick_agent_task(self, task_id: str) -> dict | None:
+        with self.connection() as db:
+            row = db.execute("SELECT * FROM quick_agent_tasks WHERE id=?", (task_id,)).fetchone()
+        return self._decode(row, ("result",))
+
+    def list_quick_agent_tasks(self, workspace_id: str) -> list[dict]:
+        with self.connection() as db:
+            rows = db.execute("SELECT * FROM quick_agent_tasks WHERE workspace_id=? ORDER BY created_at",
+                              (workspace_id,)).fetchall()
+        return [self._decode(row, ("result",)) for row in rows]
+
+    def update_quick_agent_task(self, task_id: str, **fields: Any) -> dict:
+        allowed = {"status", "round"}
+        assignments, values = [], []
+        for name, value in fields.items():
+            if name in allowed:
+                assignments.append(f"{name}=?"); values.append(value)
+        if "result" in fields:
+            assignments.append("result_json=?"); values.append(json.dumps(fields["result"]))
+        if assignments:
+            assignments.append("updated_at=?"); values.extend((utc_now(), task_id))
+            with self._lock, self.connection() as db:
+                db.execute(f"UPDATE quick_agent_tasks SET {', '.join(assignments)} WHERE id=?", values)
+        return self.get_quick_agent_task(task_id)
+
     def create_research(self, data: dict[str, Any]) -> dict:
         now = utc_now()
         with self._lock, self.connection() as db:
@@ -214,21 +393,26 @@ class ResearchStateStore:
                 (id,name,goal,constraints_json,mode,status,budget_total,budget_used,locks_json,
                  created_at,updated_at,budgets_json,geometry_json,material_json,loads_json,
                  boundary_conditions_json,hypothesis,current_question,current_round,locale,defaults_json,
-                 contract_json)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                 contract_json,workspace_id)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (data["id"], data["name"], data["goal"], json.dumps(data["constraints"]),
                  data["mode"], "READY", data["budget_total"], 0, "{}", now, now,
                  json.dumps(data.get("budgets", {})), json.dumps(data.get("geometry", {})),
                  json.dumps(data.get("material", {})), json.dumps(data.get("loads", [])),
                  json.dumps(data.get("boundary_conditions", {})), data.get("hypothesis"),
                  None, 0, data.get("locale", "zh-CN"), json.dumps(data.get("defaults", {})),
-                 json.dumps(data.get("contract", {}))))
+                 json.dumps(data.get("contract", {})), data.get("workspace_id")))
         return self.get_research(data["id"])
 
-    def list_research(self, archived: bool = False) -> list[dict]:
+    def list_research(self, archived: bool = False, workspace_id: str | None = None) -> list[dict]:
         with self.connection() as db:
             operator = "IS NOT NULL" if archived else "IS NULL"
-            rows = db.execute(f"SELECT * FROM research WHERE archived_at {operator} ORDER BY updated_at DESC").fetchall()
+            where = f"archived_at {operator}"
+            params: list[Any] = []
+            if workspace_id is not None:
+                where += " AND workspace_id=?"
+                params.append(workspace_id)
+            rows = db.execute(f"SELECT * FROM research WHERE {where} ORDER BY updated_at DESC", params).fetchall()
         return [self._decode(row, ("constraints", "locks", "budgets", "geometry", "material",
                                    "loads", "boundary_conditions", "defaults", "contract")) for row in rows]
 
@@ -240,7 +424,7 @@ class ResearchStateStore:
 
     def update_research(self, research_id: str, **fields: Any) -> dict:
         allowed = {"name", "goal", "mode", "status", "budget_total", "budget_used",
-                   "hypothesis", "current_question", "current_round", "termination_reason", "locale", "archived_at"}
+                   "hypothesis", "current_question", "current_round", "termination_reason", "locale", "archived_at", "workspace_id"}
         assignments, values = [], []
         for name, value in fields.items():
             if name in allowed:
@@ -281,13 +465,17 @@ class ResearchStateStore:
             ).fetchone()[0]
             db.execute("""INSERT INTO experiments
                 (id,research_id,ordinal,purpose,fidelity,mesh_level,backend,parameters_json,
+                 dimension,solver_profile_json,estimated_seconds,estimated_memory_mb,execution_mode,legacy_fidelity,
                  warm_start,status,safety,created_at,proposal_id,intent,round_number,decision_source,
                  intent_source,policy_version,model,provider,session_id,evidence_ids_json,result_source,
                  knowledge_ids_json,subagent_task_ids_json,solver_variant,acceleration_mode,
-                 review_verdict,human_decision,requires_approval)
-                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                 review_verdict,human_decision,requires_approval,overlay_json)
+                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (data["id"], data["research_id"], ordinal, data["purpose"], data["fidelity"],
                  data["mesh_level"], data["backend"], json.dumps(data["parameters"]),
+                 data.get("dimension", 2), json.dumps(data.get("solver_profile", {})),
+                 data.get("estimated_seconds", 0), data.get("estimated_memory_mb", 0),
+                 data.get("execution_mode", "COPILOT"), data.get("legacy_fidelity"),
                  data.get("warm_start"), data["status"], data.get("safety", "LOW"), now,
                  data.get("proposal_id"), data.get("intent", "MANUAL"), data.get("round_number", 1),
                  data.get("decision_source", "HUMAN"), data.get("intent_source", "HUMAN"),
@@ -298,28 +486,30 @@ class ResearchStateStore:
                  json.dumps(data.get("subagent_task_ids", [])),
                  data.get("solver_variant", "auto"), data.get("acceleration_mode", "auto"),
                  data.get("review_verdict"), data.get("human_decision"),
-                 int(bool(data.get("requires_approval", False)))))
+                 int(bool(data.get("requires_approval", False))), json.dumps(data.get("overlay", {}))))
         return self.get_experiment(data["id"])
 
     def get_experiment(self, experiment_id: str) -> dict | None:
         with self.connection() as db:
             row = db.execute("SELECT * FROM experiments WHERE id=?", (experiment_id,)).fetchone()
-        return self._decode(row, ("parameters", "result", "evidence_ids", "knowledge_ids",
-                                  "subagent_task_ids"))
+        return self._decode(row, ("parameters", "result", "solver_profile", "evidence_ids", "knowledge_ids",
+                                  "subagent_task_ids", "overlay"))
 
     def list_experiments(self, research_id: str) -> list[dict]:
         with self.connection() as db:
             rows = db.execute(
                 "SELECT * FROM experiments WHERE research_id=? ORDER BY ordinal", (research_id,)
             ).fetchall()
-        return [self._decode(row, ("parameters", "result", "evidence_ids", "knowledge_ids",
-                                   "subagent_task_ids")) for row in rows]
+        return [self._decode(row, ("parameters", "result", "solver_profile", "evidence_ids", "knowledge_ids",
+                                   "subagent_task_ids", "overlay")) for row in rows]
 
     def update_experiment(self, experiment_id: str, **fields: Any) -> dict:
         allowed = {"status", "progress", "current_iteration", "run_id", "safety",
                    "error", "started_at", "completed_at", "purpose", "fidelity", "proposal_id",
                    "intent", "cached", "result_source", "solver_variant", "acceleration_mode",
-                   "solver_sha256", "task_hash", "review_verdict", "human_decision"}
+                   "solver_sha256", "task_hash", "review_verdict", "human_decision", "dimension",
+                   "estimated_seconds", "estimated_memory_mb", "execution_mode", "legacy_fidelity",
+                   "requires_approval"}
         assignments, values = [], []
         for name, value in fields.items():
             if name in allowed:
@@ -328,6 +518,9 @@ class ResearchStateStore:
         if "parameters" in fields:
             assignments.append("parameters_json=?")
             values.append(json.dumps(fields["parameters"]))
+        if "solver_profile" in fields:
+            assignments.append("solver_profile_json=?")
+            values.append(json.dumps(fields["solver_profile"]))
         if "result" in fields:
             assignments.append("result_json=?")
             values.append(json.dumps(fields["result"], default=_json_default))
@@ -336,16 +529,46 @@ class ResearchStateStore:
             with self._lock, self.connection() as db:
                 db.execute(f"UPDATE experiments SET {', '.join(assignments)} WHERE id=?", values)
         return self.get_experiment(experiment_id)
+
     def claim_experiment_for_run(self, experiment_id: str, claim_id: str) -> bool:
-        """Atomically claim one runnable experiment across store/process instances."""
+        """Atomically claim a runnable experiment and reserve one budget unit."""
         with self._lock, self.connection() as db:
             cursor = db.execute("""UPDATE experiments
                 SET status='RUNNING', run_id=?, started_at=?, completed_at=NULL,
                     error=NULL, progress=0
                 WHERE id=? AND status IN ('WAITING','FAILED','CANCELLED')""",
-                (claim_id, utc_now(), experiment_id),
-            )
-            return cursor.rowcount == 1
+                (claim_id, utc_now(), experiment_id))
+            if cursor.rowcount != 1:
+                return False
+            reserved = db.execute("""UPDATE research
+                SET budget_used=budget_used+1, status='RUNNING', updated_at=?
+                WHERE id=(SELECT research_id FROM experiments WHERE id=?)
+                  AND budget_used < budget_total""",
+                (utc_now(), experiment_id))
+            if reserved.rowcount != 1:
+                db.rollback()
+                raise ValueError("Research experiment budget is exhausted")
+            return True
+
+    def fail_unsubmitted_claim(self, experiment_id: str, error: str) -> bool:
+        """Fail a preparation/submit claim and release its unused budget unit."""
+        with self._lock, self.connection() as db:
+            row = db.execute(
+                "SELECT research_id, run_id, status FROM experiments WHERE id=?",
+                (experiment_id,),
+            ).fetchone()
+            if not row or row["status"] != "RUNNING" or not str(row["run_id"] or "").startswith("claim_"):
+                return False
+            cursor = db.execute("""UPDATE experiments
+                SET status='FAILED', progress=1, completed_at=?, error=?
+                WHERE id=? AND status='RUNNING' AND run_id=?""",
+                (utc_now(), error, experiment_id, row["run_id"]))
+            if cursor.rowcount != 1:
+                return False
+            db.execute("""UPDATE research
+                SET budget_used=MAX(0, budget_used-1), updated_at=? WHERE id=?""",
+                (utc_now(), row["research_id"]))
+            return True
 
     def append_event(self, research_id: str, kind: str, title: str, body: str,
                      experiment_id: str | None = None, payload: dict | None = None,
@@ -426,31 +649,36 @@ class ResearchStateStore:
         with self._lock, self.connection() as db:
             db.execute("""INSERT INTO proposals
                 (id,research_id,intent,purpose,fidelity,backend,parameters_json,estimated_cost,
+                 dimension,solver_profile_json,estimated_seconds,estimated_memory_mb,execution_mode,
                  risk,safety_status,approval_required,source_experiment,controlled_factors_json,
                  status,experiment_id,created_at,updated_at,decision_source,intent_source,
-                 policy_version,model,provider,session_id,evidence_ids_json)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                 policy_version,model,provider,session_id,evidence_ids_json,proposal_source,overlay_json)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (data["id"], data["research_id"], data["intent"], data["purpose"],
-                 data["fidelity"], data["backend"], json.dumps(data["parameters"]),
-                 data["estimated_cost"], data["risk"], data["safety_status"],
+                  data["fidelity"], data["backend"], json.dumps(data["parameters"]),
+                  data["estimated_cost"], data.get("dimension", 2),
+                  json.dumps(data.get("solver_profile", {})), data.get("estimated_seconds", 0),
+                  data.get("estimated_memory_mb", 0), data.get("execution_mode", "COPILOT"),
+                  data["risk"], data["safety_status"],
                  int(data.get("approval_required", False)), data.get("source_experiment"),
                  json.dumps(data.get("controlled_factors", [])), data.get("status", "PREVIEW"),
                  data.get("experiment_id"), now, now, data.get("decision_source", "HUMAN"),
                  data.get("intent_source", "HUMAN"), data.get("policy_version", "v6-intent-compiler-1"),
                  data.get("model"), data.get("provider"), data.get("session_id"),
-                 json.dumps(data.get("evidence_ids", []))))
+                 json.dumps(data.get("evidence_ids", [])), data.get("proposal_source", "LEGACY_POLICY"),
+                 json.dumps(data.get("overlay", {}))))
         return self.get_proposal(data["id"])
 
     def get_proposal(self, proposal_id: str) -> dict | None:
         with self.connection() as db:
             row = db.execute("SELECT * FROM proposals WHERE id=?", (proposal_id,)).fetchone()
-        return self._decode(row, ("parameters", "controlled_factors", "evidence_ids"))
+        return self._decode(row, ("parameters", "solver_profile", "controlled_factors", "evidence_ids", "overlay"))
 
     def list_proposals(self, research_id: str) -> list[dict]:
         with self.connection() as db:
             rows = db.execute("SELECT * FROM proposals WHERE research_id=? ORDER BY created_at",
                               (research_id,)).fetchall()
-        return [self._decode(row, ("parameters", "controlled_factors", "evidence_ids")) for row in rows]
+        return [self._decode(row, ("parameters", "solver_profile", "controlled_factors", "evidence_ids", "overlay")) for row in rows]
 
     def update_proposal(self, proposal_id: str, **fields: Any) -> dict:
         allowed = {"status", "experiment_id", "safety_status"}
@@ -669,4 +897,9 @@ def _event_envelope(value: dict | None) -> dict | None:
     value["type"] = value.get("event_type") or _event_type(value["kind"], value["title"])
     value["source"] = value.get("source") or _event_source(value["kind"], value["title"])
     value["timestamp"] = value.get("created_at")
+    value["eventId"] = value["event_id"]
+    value["ownerType"] = "experiment" if value.get("experiment_id") else "research"
+    value["ownerId"] = value.get("experiment_id") or value.get("research_id")
+    value["runId"] = (value.get("payload") or {}).get("runId")
+    value["experimentId"] = value.get("experiment_id")
     return value

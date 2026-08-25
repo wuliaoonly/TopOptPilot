@@ -1,0 +1,14 @@
+{
+  "purpose": "Validate one controlled 2D MBB configuration from an immutable Quick baseline",
+  "dimension": 2,
+  "backend": "MATLAB_MCP",
+  "solverProfile": "standard",
+  "parameters": {
+    "volfrac": 0.4,
+    "penal": 3.0,
+    "rmin": 1.5,
+    "max_iter": 3
+  },
+  "overlay": {},
+  "staticWarningsConfirmed": false
+}

@@ -14,7 +14,7 @@ type Props={research:Research;selected?:Experiment;streamText:string;view:Canvas
 export default function ExperimentCanvas({research,selected,streamText,view,setView,onSelect,onAutonomous,onDecision,onEdit}:Props){
   const zh=research.locale==="zh-CN",l=(cn:string,en:string)=>zh?cn:en,pending=research.decisions.filter(d=>d.status==="PENDING"),running=research.experiments.find(e=>e.status==="RUNNING")||selected;
   const [compareIds,setCompareIds]=useState<[string,string]>([research.experiments[0]?.id||"",research.experiments[1]?.id||research.experiments[0]?.id||""]),[comparison,setComparison]=useState<Record<string,any>|null>(null);
-  useEffect(()=>{if(view==="COMPARE"&&compareIds[0]&&compareIds[1]&&compareIds[0]!==compareIds[1])api.compare(research.id,...compareIds).then(setComparison).catch(()=>setComparison(null))},[view,compareIds,research.id]);
+  useEffect(()=>{if(view==="COMPARE"&&compareIds[0]&&compareIds[1]&&compareIds[0]!==compareIds[1])api.researchCompare(research.id,...compareIds).then(setComparison).catch(()=>setComparison(null))},[view,compareIds,research.id]);
   const latestAgent=useMemo(()=>[...research.events].reverse().find(e=>e.source==="PI_AGENT"&&e.type==="AGENT_MESSAGE"),[research.events]);
   const tabs:CanvasView[]=["SETUP","HYPOTHESIS","PLAN","RUN","ANALYZE","COMPARE","DECIDE","REPORT","TIMELINE"];
   return <div className="canvas-shell"><div className="canvas-tabs">{tabs.map(item=><button className={view===item?"active":""} key={item} onClick={()=>setView(item)}>{item}</button>)}<button className="canvas-run" onClick={onAutonomous}><Play/> {l("启动闭环","Start loop")}</button></div><div className="canvas-body">

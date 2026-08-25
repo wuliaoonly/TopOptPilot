@@ -1,6 +1,7 @@
 from .models import (
     AgentRole,
     ArtifactLineage,
+    BudgetSpec,
     ControlledComparison,
     DecisionStatus,
     EventKind,
@@ -9,7 +10,6 @@ from .models import (
     ExperimentStatus,
     ExperimentHypothesis,
     FailureType,
-    Fidelity,
     IntentRequest,
     IntentType,
     KnowledgeDocument,
@@ -27,8 +27,8 @@ from .models import (
 )
 
 __all__ = [
-    "AgentRole", "ArtifactLineage", "ControlledComparison", "DecisionStatus", "EventKind", "ExperimentProposal", "ExperimentCreate",
-    "ExperimentStatus", "ExperimentHypothesis", "FailureType", "Fidelity", "IntentRequest", "IntentType",
+    "AgentRole", "ArtifactLineage", "BudgetSpec", "ControlledComparison", "DecisionStatus", "EventKind", "ExperimentProposal", "ExperimentCreate",
+    "ExperimentStatus", "ExperimentHypothesis", "FailureType", "IntentRequest", "IntentType",
     "KnowledgeDocument", "ResearchCreate", "SafetyStatus", "SolverCapability",
     "SolverVariant", "SubagentDispatchRequest", "SubagentStatus", "SubagentTask", "SubagentVerdict", "TerminationReason", "ToolRequest",
     "WorkspaceCommandResult",

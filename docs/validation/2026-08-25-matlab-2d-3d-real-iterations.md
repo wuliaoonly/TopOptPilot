@@ -1,5 +1,8 @@
 # iDeskTop v2：用户 2D/3D MATLAB 源码与真实迭代可视化验收
 
+> 历史证据说明：本文记录的是上游 `iDeskTop-v2-融合@a4f4002` 的当时验证结果，仅用于追溯；不代表当前 TopOptPilot V6.2.2 融合分支已通过同等 MATLAB、安装包或硬件环境验收。
+
+
 日期：2026-08-25
 
 ## 源码边界
@@ -77,3 +80,4 @@ MATLAB：D:\Tools\matlab\MATLAB R2024b(64bit)\bin\matlab.exe
 - 签名：NotSigned
 - 打包 sidecar：健康检查 200；带令牌设置接口 200；无令牌设置接口 401
 - 标准包包含 Node、MCP、.pi、sidecar 和 2D/3D MATLAB 源码，不包含 MATLAB Runtime DLL 或编译 Runtime solver。
+

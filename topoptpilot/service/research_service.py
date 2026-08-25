@@ -11,8 +11,10 @@ import uuid
 import zipfile
 import hashlib
 import platform
+import re
 import copy
 from concurrent.futures import Future
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -21,21 +23,24 @@ from topoptpilot.executor.cache import ResultCache
 from topoptpilot.executor.executor import build_solver_task
 from topoptpilot.memory import ResearchStateStore
 from topoptpilot.memory.research_state import utc_now
+from topoptpilot.memory.workspace_migration import migrate_to_workspace_state
 from topoptpilot.knowledge import KnowledgeBase
-from topoptpilot.fidelity import FidelityManager
-from topoptpilot.orchestrator import ResearchOrchestrator
-from topoptpilot.policy.approval_policy import requires_human_approval
+from topoptpilot.solver_profiles import DirectSolverPolicy
+from topoptpilot.evaluator import evaluate_result
+from topoptpilot.evaluator.failure_detector import detect_failure
+from topoptpilot.policy.safety_guard import evaluate_safety
 from topoptpilot.schemas import (
     DecisionStatus, EventKind, ExperimentCreate, ExperimentStatus,
     ResearchCreate, WorkspaceCommandResult,
 )
 from topoptpilot.schemas.models import AppSettings
+from topoptpilot.schemas.api_contracts import ExperimentDraft
 from topoptpilot.tools import ResearchTools
 from topoptpilot.agent_runtime import PiBridge
 from topoptpilot.reports import ResearchReportGenerator
 from topoptpilot.security import (delete_qwen_api_key, get_qwen_api_key,
                                   qwen_api_key_source, set_qwen_api_key)
-from agent.llm.client import PiAgentClient
+from agent.llm.client import PiAgentClient, normalize_base_url
 from mcp.matlab_mcp import MatlabMcpError, MatlabMcpWorker
 
 
@@ -43,6 +48,10 @@ STATUS_SYMBOLS = {
     "WAITING": "○", "RUNNING": "▶", "SUCCESS": "✓",
     "FAILED": "✗", "CANCELLED": "⚠",
 }
+
+# Upper bound for any legitimate MATLAB MCP restart phase (handshake + probe);
+# beyond this a STARTING state is considered wedged and retryable.
+_MATLAB_RESTART_STALE_SECONDS = 300.0
 
 DEFAULT_APP_SETTINGS = AppSettings().model_dump()
 
@@ -66,34 +75,31 @@ def _validate_writable_dir(raw: str | None) -> Path | None:
         raise ValueError("Directory must exist and be writable")
     return candidate
 
-def _validate_fidelity_backend(fidelity: str, backend: str) -> str:
-    value = str(backend)
-    if value == "simulate":
-        raise ValueError("backend=simulate is forbidden for formal experiments")
-    code = str(fidelity).strip().split(maxsplit=1)[0]
-    try:
-        expected = FidelityManager.backend_for(code)
-    except (KeyError, ValueError) as exc:
-        raise ValueError("fidelity must start with F0, F1, F2, or F3") from exc
-    if value != expected:
-        raise ValueError(
-            f"{code} requires backend={expected}; received backend={value}"
-        )
-    return code
+
+def _format_metric(value: Any, *, percent: bool = False) -> str:
+    if value is None:
+        return "未计算"
+    if percent:
+        return f"{float(value):.1%}"
+    if isinstance(value, float):
+        return f"{value:.6g}"
+    return str(value)
 
 
 class ResearchService:
     def __init__(self, data_dir: str | Path | None = None, max_workers: int = 2,
                  agent_client: PiAgentClient | None = None,
                  enable_agent_runtime: bool = True):
-        configured_data = data_dir or os.environ.get("TOPPILOT_DATA_DIR") or os.environ.get("IDESKTOP_V2_DATA_DIR")
-        if not configured_data:
-            configured_data = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData/Local")) / "iDeskTopV2"
+        default_data = (Path(os.environ["LOCALAPPDATA"]) / "TopOptPilot"
+                        if os.environ.get("LOCALAPPDATA") else Path("topoptpilot/storage"))
+        configured_data = (data_dir or os.environ.get("TOPPILOT_DATA_DIR")
+                           or os.environ.get("IDESKTOP_V2_DATA_DIR") or default_data)
         self.data_dir = Path(configured_data).resolve()
         self.project_root = Path(os.environ.get(
             "TOPPILOT_RESOURCE_ROOT", Path(__file__).resolve().parents[2])).resolve()
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.store = ResearchStateStore(self.data_dir / "research.db")
+        self.workspace_migration = migrate_to_workspace_state(self.store, self.data_dir)
         self.knowledge = KnowledgeBase(self.store, self.project_root / "topoptpilot/knowledge/documents")
         self.queue = ExperimentQueue(self.data_dir / "progress", max_workers=max_workers)
         self.matlab_worker = MatlabMcpWorker(self.data_dir, self.project_root)
@@ -102,7 +108,6 @@ class ResearchService:
             (self.store.get_app_settings() or {}).get("data", {}).get("cache_dir"))
         self.cache = ResultCache(self.cache_dir)
         self.report_generator = ResearchReportGenerator(self.data_dir)
-        self.orchestrator = ResearchOrchestrator()
         self.agent_client = agent_client or PiAgentClient(api_key=get_qwen_api_key())
         self.tools = ResearchTools(self)
         self.pi_runtime = None
@@ -115,18 +120,57 @@ class ResearchService:
         else:
             self.pi_runtime_error = "disabled"
         self._completion_lock = threading.RLock()
-        self._matlab_restart = {"running": False, "last_error": None, "updated_at": None}
-        self._qwen_validation = {"status": "CONFIGURED" if get_qwen_api_key()
-                                 else "NOT_CONFIGURED", "checked_at": None, "error": None}
-        # Keep one stable lock per touched experiment for the service lifetime.
-        # Replacing terminal locks can recreate the race this table prevents.
         self._experiment_locks_guard = threading.Lock()
         self._experiment_locks: dict[str, threading.RLock] = {}
+        self._matlab_restart_lock = threading.RLock()
+        self._matlab_restart = {
+            "running": False, "phase": "IDLE", "attempt_id": None,
+            "started_at": None, "last_error": None, "warmup": None,
+            "updated_at": None,
+        }
+        self._qwen_validation = {"status": "CONFIGURED" if get_qwen_api_key()
+                                 else "NOT_CONFIGURED", "checked_at": None, "error": None}
+
+    @staticmethod
+    def _initial_plan(research: dict[str, Any]) -> str:
+        budget = DirectSolverPolicy.budget(research, [])
+        dimension = DirectSolverPolicy.dimension(research)
+        return (f"Round 1 uses a controlled {dimension}D MATLAB MCP baseline. "
+                f"Remaining experiment budget: {budget['remaining']['total']}. "
+                "The Policy Engine will choose the smallest solver profile capable of testing "
+                "the current research question.")
+
+    @staticmethod
+    def _inspect_proposal(experiment: dict[str, Any]) -> dict[str, Any]:
+        return evaluate_safety(experiment.get("parameters") or {})
+
+    @staticmethod
+    def _analyze_result(research: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
+        evaluation = evaluate_result(result, research.get("constraints") or {})
+        failure = detect_failure(result, research.get("constraints") or {})
+        objective = result.get("objective") or {}
+        quality = result.get("quality") or {}
+        summary = (
+            f"Compliance: {_format_metric(objective.get('compliance'))}\n\n"
+            f"Gray ratio: {_format_metric(quality.get('gray_ratio'), percent=True)}\n\n"
+            f"Connected components: {_format_metric(quality.get('connected_components'))}\n\n"
+            f"Evaluator verdict: {'FEASIBLE' if evaluation['success'] else 'INFEASIBLE'}\n\n"
+            f"{evaluation['summary']}"
+        )
+        feedback = f"{evaluation['next_action']}\n\nReason: {evaluation['summary']}"
+        return {"evaluation": evaluation, "analysis": summary, "feedback": feedback,
+                "failure": failure}
 
     def get_settings(self) -> dict[str, Any]:
         persisted = self.store.get_app_settings() or {}
         updated_at = persisted.pop("updated_at", None)
         settings = AppSettings.model_validate(_deep_merge(DEFAULT_APP_SETTINGS, persisted)).model_dump()
+        # V6.1 stored DashScope/Qwen defaults.  Migrate only those untouched
+        # defaults; an explicitly customized compatible endpoint is preserved.
+        if (settings["agent"]["model"] == "qwen3.7-plus" and
+                "dashscope.aliyuncs.com" in settings["agent"]["base_url"]):
+            settings["agent"]["model"] = "deepseek-v4-flash"
+            settings["agent"]["base_url"] = "https://api.ai-pixel.online/v1"
         settings["api_key_status"] = qwen_api_key_source()
         settings["updated_at"] = updated_at
         return settings
@@ -193,7 +237,10 @@ class ResearchService:
         endpoint = urlparse(merged["agent"]["base_url"].strip())
         if endpoint.scheme not in {"http", "https"} or not endpoint.netloc:
             raise ValueError("Agent Base URL must be an absolute HTTP(S) URL")
-        merged["agent"]["base_url"] = merged["agent"]["base_url"].rstrip("/")
+        # Normalize to an explicit /v1 path: aggregator gateways return their
+        # HTML landing page for bare-host requests, which surfaces as an
+        # empty stream instead of a JSON completion.
+        merged["agent"]["base_url"] = normalize_base_url(merged["agent"]["base_url"])
         matlab_root = merged["compute"].get("matlab_root")
         if matlab_root:
             candidate = Path(matlab_root).expanduser().resolve()
@@ -246,16 +293,17 @@ class ResearchService:
 
     def set_agent_key(self, api_key: str) -> dict[str, Any]:
         set_qwen_api_key(api_key)
-        self.agent_client.update_config(api_key=get_qwen_api_key())
+        self.agent_client.update_config(api_key=api_key)
         self._qwen_validation = {"status": "CONFIGURED", "checked_at": None, "error": None}
         return {"configured": True, "source": qwen_api_key_source()}
 
     def delete_agent_key(self) -> dict[str, Any]:
         deleted = delete_qwen_api_key()
-        self.agent_client.api_key = os.getenv("DASHSCOPE_API_KEY", "")
+        self.agent_client.api_key = get_qwen_api_key()
         self._qwen_validation = {"status": "CONFIGURED" if self.agent_client.api_key else "NOT_CONFIGURED",
                                  "checked_at": None, "error": None}
         return {"deleted": deleted, "source": qwen_api_key_source()}
+
     def test_agent_settings(self) -> dict[str, Any]:
         settings = self.get_settings()["agent"]
         key = get_qwen_api_key()
@@ -289,7 +337,7 @@ class ResearchService:
                 "database": str(self.store.db_path), "cache_dir": str(self.cache_dir),
                 "cache_bytes": directory_size(self.cache_dir),
                 "log_dir": str(self.data_dir / "logs"), "free_disk_bytes": disk.free,
-                "sidecar_port": os.getenv("TOPPILOT_SIDECAR_PORT"), "version": "6.1.1"}
+            "sidecar_port": os.getenv("TOPPILOT_SIDECAR_PORT"), "version": "6.3.0"}
 
     def export_diagnostics(self) -> Path:
         output = self.data_dir / "diagnostics" / f"topoptpilot-diagnostics-{uuid.uuid4().hex[:8]}.zip"
@@ -329,10 +377,10 @@ class ResearchService:
         components = {
             "pi_rpc": {"status": pi_status, "runtime": "Pi Agent RPC",
                        "model": runtime.get("model"), "last_error": runtime.get("last_error")},
-            "qwen_api": {**self._qwen_validation, "provider": "dashscope",
+            "qwen_api": {**self._qwen_validation, "provider": "openai-compatible",
                          "model": self.get_settings()["agent"]["model"]},
-            "matlab_2d": {"status": matlab_state, "backend": "MATLAB MCP", "fidelities": "F0/F1"},
-            "matlab_3d": {"status": matlab_state, "backend": "MATLAB MCP", "fidelities": "F2/F3"},
+            "matlab_2d": {"status": matlab_state, "backend": "MATLAB MCP", "execution": "DIRECT"},
+            "matlab_3d": {"status": matlab_state, "backend": "MATLAB MCP", "execution": "DIRECT"},
             "python_dev": {"status": "CONFIGURED", "backend": "development regression only"},
             # Kept for V5 diagnostics consumers only; the V6 Workspace does not
             # present these as formal experiment backends.
@@ -342,9 +390,9 @@ class ResearchService:
             "matlab": {"status": matlab_state, "version": matlab_mcp.get("matlab_version"),
                        "root": matlab_mcp.get("matlab_root")},
             "sidecar": {"status": "VERIFIED", "port": os.getenv("TOPPILOT_SIDECAR_PORT"),
-                        "version": "6.1.1"},
+                "version": "6.3.0"},
         }
-        return {"status": "ok", "version": "6.1.1", "components": components,
+        return {"status": "ok", "version": "6.3.0", "components": components,
                 "solver_2d": matlab_state in {"READY", "VERIFIED"}, "solver_3d": matlab_state in {"READY", "VERIFIED"},
                 "matlab": matlab_mcp["state"] != "UNAVAILABLE", "matlab_mcp": matlab_mcp,
                 "database": str(self.store.db_path),
@@ -353,15 +401,10 @@ class ResearchService:
                 "agent_configured": bool(self.agent_client.api_key),
                 "python_agent_fallback": self.agent_client.framework, "pi_rpc": runtime}
 
-    @staticmethod
-    def _matlab_available() -> bool:
-        try:
-            from solver.matlab_backend import is_matlab_available
-            return bool(is_matlab_available())
-        except Exception:
-            return False
-
     def create_research(self, request: ResearchCreate | dict[str, Any]) -> dict[str, Any]:
+        workspace_id = request.get("workspace_id") or request.get("workspaceId") if isinstance(request, dict) else None
+        if workspace_id and not self.store.get_workspace(str(workspace_id)):
+            raise ValueError("Workspace does not exist")
         if isinstance(request, ResearchCreate):
             model, inherited = request, {}
         else:
@@ -378,23 +421,23 @@ class ResearchService:
                    and key in request else "DEFAULT") for key in (
                        "name", "goal", "description", "geometry", "material", "loads", "boundary_conditions",
                        "constraints", "mode", "budget_total", "budgets", "hypothesis")}
-        contract = {"version": "6.0", "immutable": True, "confirmed_at": utc_now(),
+        contract = {"version": "6.2", "immutable": True, "confirmed_at": utc_now(),
                     "goal": model.goal, "description": model.description, "geometry": model.geometry, "material": model.material,
                     "loads": model.loads, "boundary_conditions": model.boundary_conditions,
                     "constraints": model.constraints, "mode": model.mode,
                     "budget_total": model.budget_total, "budgets": payload["budgets"],
                     "hypothesis": model.hypothesis, "field_sources": sources}
         research = self.store.create_research({"id": research_id, **payload, **inherited,
-                                               "contract": contract})
+                                               "contract": contract, "workspace_id": workspace_id})
         self.store.append_event(research_id, EventKind.USER.value, "RESEARCH GOAL",
                                 f"{model.goal}\n\nConstraints: {json.dumps(model.constraints, ensure_ascii=False)}")
         self.store.append_event(research_id, EventKind.PLANNER.value, "ROUND 1 STRATEGY",
-                                self.orchestrator.initial_plan(research))
+                                self._initial_plan(research))
         return self.get_research(research_id)
 
     def submit_proposal(self, research_id: str, proposal_id: str) -> dict[str, Any]:
         """Atomically validate and submit one deterministic-policy proposal."""
-        research = self._require_research(research_id)
+        research = self._require_active_research(research_id)
         proposal = self.store.get_proposal(proposal_id)
         if not proposal or proposal["research_id"] != research_id:
             raise KeyError(f"Proposal {proposal_id} does not exist")
@@ -402,17 +445,46 @@ class ResearchService:
             return {"proposal": proposal, "experiment": self.get_experiment(proposal["experiment_id"])}
         if proposal["safety_status"] == "REJECTED":
             raise ValueError("Safety Policy rejected this proposal")
-        budget = FidelityManager.budget(research, self.store.list_experiments(research_id))
-        fidelity = str(proposal["fidelity"])
-        if budget["remaining"]["total"] <= 0 or budget["remaining"].get(fidelity, 0) <= 0:
-            raise ValueError(f"No remaining {fidelity} budget")
+        budget = DirectSolverPolicy.budget(research, self.store.list_experiments(research_id))
+        if budget["remaining"]["total"] <= 0:
+            raise ValueError("Research experiment budget is exhausted")
         if budget["time_remaining"] is not None and budget["time_remaining"] <= 0:
             raise ValueError("Research time budget is exhausted")
-        if fidelity == "F3" and self.pi_runtime:
-            self.pi_runtime.subagents.dispatch(
-                research_id, "INDEPENDENT_REVIEWER",
-                "Audit this F3 fidelity upgrade for evidence sufficiency, controlled comparison, "
-                "budget value and safety. Do not submit it.", proposal.get("evidence_ids", []), proposal_id)
+        if (budget["time_remaining"] is not None and
+                float(proposal.get("estimated_seconds") or 0) > budget["time_remaining"]):
+            raise ValueError("Proposal exceeds the remaining compute-time budget")
+        review_verdict = None
+        if proposal["intent"] in {"VERIFY_CANDIDATE", "TEST_COMPETING_EXPLANATIONS"} and self.pi_runtime:
+            review_tasks = [item for item in self.store.list_subagent_tasks(research_id)
+                            if item.get("proposal_id") == proposal_id
+                            and item.get("role") == "INDEPENDENT_REVIEWER"]
+            completed = [item for item in review_tasks if item.get("status") == "COMPLETED"]
+            if completed:
+                text = str((completed[-1].get("result") or {}).get("text") or "").upper()
+                match = re.search(r"\b(APPROVE|REVISE|REJECT)\b", text[:160])
+                review_verdict = match.group(1) if match else "REVISE"
+                if review_verdict != "APPROVE":
+                    self.store.update_proposal(proposal_id, status=f"REVIEW_{review_verdict}")
+                    raise ValueError(f"Independent Reviewer returned {review_verdict}; MATLAB was not started")
+            else:
+                if not any(item.get("status") in {"QUEUED", "RUNNING"} for item in review_tasks):
+                    proposal_summary = {
+                        key: proposal.get(key) for key in (
+                            "id", "intent", "purpose", "dimension", "solver_profile", "parameters",
+                            "estimated_seconds", "estimated_memory_mb", "source_experiment",
+                            "controlled_factors", "evidence_ids", "safety_status",
+                        )
+                    }
+                    self.pi_runtime.subagents.dispatch(
+                        research_id, "INDEPENDENT_REVIEWER",
+                        "Audit this direct solver proposal for evidence sufficiency, controlled comparison, "
+                        "budget value and safety. Begin the answer with APPROVE, REVISE, or REJECT, then give "
+                        "a concise reason. Do not submit it. Authoritative proposal: "
+                        f"{json.dumps(proposal_summary, ensure_ascii=False, default=str)}",
+                        proposal.get("evidence_ids", []), proposal_id)
+                self.store.update_proposal(proposal_id, status="REVIEW_PENDING")
+                return {"proposal": self.store.get_proposal(proposal_id), "experiment": None,
+                        "review_pending": True}
         knowledge_ids: list[str] = []
         for event in reversed(self.store.list_events(research_id)):
             for knowledge_id in (event.get("payload") or {}).get("knowledge_ids", []):
@@ -423,13 +495,15 @@ class ResearchService:
         related_tasks = [item["id"] for item in self.store.list_subagent_tasks(research_id)
                          if item.get("proposal_id") == proposal_id][-8:]
         request = ExperimentCreate(
-            purpose=proposal["purpose"], fidelity={
-                "F0": "F0 — MATLAB 2D Coarse", "F1": "F1 — MATLAB 2D Fine",
-                "F2": "F2 — MATLAB 3D Coarse", "F3": "F3 — MATLAB 3D Fine",
-            }[fidelity], mesh_level=FidelityManager.mesh_level(fidelity),
+            purpose=proposal["purpose"], fidelity="DIRECT", mesh_level="direct",
+            dimension=proposal["dimension"], solver_profile=proposal["solver_profile"],
+            estimated_seconds=proposal["estimated_seconds"],
+            estimated_memory_mb=proposal["estimated_memory_mb"],
+            execution_mode=proposal["execution_mode"],
             backend=proposal["backend"], parameters=proposal["parameters"],
+            overlay=proposal.get("overlay", {}),
             warm_start=proposal.get("source_experiment"),
-            requires_approval=bool(proposal["approval_required"]),
+            requires_approval=research["mode"] == "COPILOT",
             proposal_id=proposal_id, intent=proposal["intent"],
             decision_source=proposal.get("decision_source", "HUMAN"),
             intent_source=proposal.get("intent_source", "HUMAN"),
@@ -437,6 +511,7 @@ class ResearchService:
             provider=proposal.get("provider"), session_id=proposal.get("session_id"),
             evidence_ids=proposal.get("evidence_ids", []),
             knowledge_ids=knowledge_ids, subagent_task_ids=related_tasks,
+            review_verdict=review_verdict,
         )
         experiment = self.create_experiment(research_id, request)
         self.store.update_proposal(proposal_id, status=(
@@ -447,7 +522,7 @@ class ResearchService:
 
     def start_autonomous_research(self, research_id: str) -> dict[str, Any]:
         """Start the Pi-owned closed loop; Policy remains the sole parameter compiler."""
-        research = self._require_research(research_id)
+        research = self._require_active_research(research_id)
         self.store.update_research(research_id, mode="AUTONOMOUS", status="RUNNING")
         self.store.append_event(research_id, EventKind.SYSTEM.value, "ROUND_STARTED",
                                 f"Autonomous round {int(research.get('current_round', 0)) + 1} started.")
@@ -455,12 +530,11 @@ class ResearchService:
         prompt = (
             "You are the primary Pi Research Agent. Begin or continue an autonomous topology-"
             "optimization campaign. First call research_get_context, research_get_budget, "
-            "solver_get_capabilities and knowledge_search. Dispatch the HYPOTHESIS and "
-            "EXPERIMENT_PLANNER Subagents when their bounded review is needed. Choose one scientific "
-            "intent, call policy_compile_intent, preview every returned proposal, "
-            "then submit the safe bounded batch within the available budget. In the initial round submit "
-            "exactly one ESTABLISH_BASELINE experiment so later choices depend on FEM evidence. Never provide numeric solver "
-            "parameters directly. Await all FEM evidence "
+            "solver_get_capabilities and knowledge_search. Dispatch the SCIENTIST Subagent when "
+            "bounded hypothesis and experiment review is needed. Choose one scientific "
+            "exact draft, call experiment_validate_draft, and present its single proposal for human approval. "
+            "Never submit or mutate parameters without that approval. In the initial round propose "
+            "exactly one baseline experiment so later choices depend on FEM evidence. Await all FEM evidence "
             f"before the next decision. Stop on goal, plateau, or exhausted budget. Reply in {language}."
         )
         threading.Thread(target=self._send_pi_or_fallback,
@@ -482,60 +556,55 @@ class ResearchService:
         if research["status"] == "STOPPED" or research.get("termination_reason"):
             return
         experiments = self.store.list_experiments(research_id)
-        budget = FidelityManager.budget(research, experiments)
+        budget = DirectSolverPolicy.budget(research, experiments)
         if budget["remaining"]["total"] <= 0:
             self.store.update_research(research_id, status="STOPPED",
                                        termination_reason="BUDGET_EXHAUSTED")
             return
         completed = [item for item in experiments if item.get("result")]
-        if not completed:
-            intent = {"intent": "ESTABLISH_BASELINE"}
-        else:
-            last = completed[-1]
-            quality = last["result"].get("quality", {})
-            if quality.get("connected_components", 1) != 1:
-                intent = {"intent": "RESTORE_CONNECTIVITY", "source_experiment": last["id"]}
-            elif quality.get("gray_ratio", 1.0) > research["constraints"].get("gray_max", 0.05):
-                intent = {"intent": "REDUCE_GRAYNESS", "source_experiment": last["id"]}
-            else:
-                intent = {"intent": "UPGRADE_FIDELITY", "source_experiment": last["id"]}
-        proposals = self.tools.policy_compile_intent(research_id, **intent,
-                                                     _decision_source="RULE_FALLBACK")
-        if not proposals:
+        profile = DirectSolverPolicy.profile(research, verify=bool(completed))
+        draft = ExperimentDraft(
+            purpose="Deterministic safe-mode baseline" if not completed else "Deterministic safe-mode verification",
+            dimension=DirectSolverPolicy.dimension(research), solverProfile="verify" if completed else "standard",
+            parameters=(completed[-1]["parameters"] if completed else
+                        (research.get("defaults") or {}).get("experiment", {}).get("parameters", {})),
+        )
+        result = self.tools.experiment_validate_draft(research_id, **draft.model_dump(by_alias=True))
+        proposal = result.get("proposal") if result.get("valid") else None
+        if not proposal:
             self.store.update_research(research_id, status="STOPPED", termination_reason="PLATEAU")
             self.store.append_event(research_id, EventKind.SYSTEM.value, "SAFE MODE STOPPED",
-                                    "Policy produced no novel controlled experiment.")
+                                    "Draft validation produced no runnable controlled experiment.")
             return
         try:
-            self.submit_proposal(research_id, proposals[0]["id"])
+            self.submit_proposal(research_id, proposal["id"])
         except ValueError as exc:
             self.store.append_event(research_id, EventKind.SYSTEM.value, "SAFE MODE STOPPED", str(exc))
 
     def _termination_reason(self, research_id: str) -> str | None:
         research = self._require_research(research_id)
         experiments = self.store.list_experiments(research_id)
-        budget = FidelityManager.budget(research, experiments)
+        budget = DirectSolverPolicy.budget(research, experiments)
         if budget["remaining"]["total"] <= 0:
             return "BUDGET_EXHAUSTED"
         if budget["time_remaining"] is not None and budget["time_remaining"] <= 0:
             return "BUDGET_EXHAUSTED"
         successful = [item for item in experiments if item.get("result") and item["status"] == "SUCCESS"]
         if successful:
-            required = str(research["constraints"].get("required_fidelity", "F2"))
-            rank = {"F0": 0, "F1": 1, "F2": 2, "F3": 3}
-            eligible = [item for item in successful
-                        if rank.get(str(item["fidelity"]).split()[0], 0) >= rank.get(required, 2)]
-            best = min(eligible, key=lambda item: item["result"]["objective"]["compliance"],
+            best = min(successful, key=lambda item: item["result"]["objective"]["compliance"],
                        default=None)
             q = (best or {}).get("result", {}).get("quality", {})
             if (q.get("gray_ratio", 1) <= research["constraints"].get("gray_max", 0.05)
                     and (not research["constraints"].get("connected", True)
                          or q.get("connected_components") == 1)):
+                # Feasibility is necessary but does not by itself validate a stated
+                # experimental hypothesis. Keep one controlled follow-up available
+                # whenever the contract contains a hypothesis and budget remains.
+                if research.get("hypothesis") and len(successful) < 2:
+                    return None
                 return "GOAL_ACHIEVED"
-        same_fidelity = [item for item in successful
-                         if str(item["fidelity"]).split()[0] == str(successful[-1]["fidelity"]).split()[0]] if successful else []
-        if len(same_fidelity) >= 4:
-            values = [item["result"]["objective"]["compliance"] for item in same_fidelity[-4:]]
+        if len(successful) >= 4:
+            values = [item["result"]["objective"]["compliance"] for item in successful[-4:]]
             if (max(values) - min(values)) / max(min(values), 1e-12) < 0.005:
                 return "PLATEAU"
         return None
@@ -552,28 +621,29 @@ class ResearchService:
 
     def archive_research(self, research_id: str) -> dict[str, Any]:
         research = self._require_research(research_id)
-        active_experiments = [
-            item["id"] for item in self.store.list_experiments(research_id)
-            if str(item.get("status", "")).upper() in {"WAITING", "QUEUED", "RUNNING"}
-        ]
-        pending_decisions = [
-            item["id"] for item in self.store.list_decisions(research_id)
-            if str(item.get("status", "")).upper() == "PENDING"
-        ]
-        active_tasks = [
-            item["id"] for item in self.store.list_subagent_tasks(research_id)
-            if str(item.get("status", "")).upper() in {"WAITING", "QUEUED", "RUNNING", "PENDING"}
-        ]
-        blockers = active_experiments + pending_decisions + active_tasks
-        if str(research.get("status", "")).upper() == "RUNNING" or blockers:
-            raise ValueError("Research 仍有运行任务或待审批事项，请先停止并处理后再移入回收站")
+        if research.get("archived_at"):
+            return research
+        active_experiments = [item["id"] for item in self.store.list_experiments(research_id)
+                              if str(item.get("status", "")).upper() in {"WAITING", "QUEUED", "RUNNING"}]
+        pending_decisions = [item["id"] for item in self.store.list_decisions(research_id)
+                             if str(item.get("status", "")).upper() == "PENDING"]
+        active_tasks = [item["id"] for item in self.store.list_subagent_tasks(research_id)
+                        if str(item.get("status", "")).upper() in {"QUEUED", "RUNNING"}]
+        if str(research.get("status", "")).upper() == "RUNNING" or active_experiments or pending_decisions or active_tasks:
+            raise ValueError("Research 仍有运行任务、最终审阅或待审批事项，请先处理后再移入回收站")
         if self.pi_runtime is not None:
             self.pi_runtime.release(research_id)
-        return self.store.update_research(research_id, archived_at=utc_now())
+        archived = self.store.update_research(research_id, archived_at=utc_now())
+        self.store.append_event(research_id, EventKind.SYSTEM.value, "RESEARCH_ARCHIVED", "Research moved to recycle bin.")
+        return archived
 
     def restore_research(self, research_id: str) -> dict[str, Any]:
-        self._require_research(research_id)
-        return self.store.update_research(research_id, archived_at=None)
+        research = self._require_research(research_id)
+        if not research.get("archived_at"):
+            return research
+        restored = self.store.update_research(research_id, archived_at=None)
+        self.store.append_event(research_id, EventKind.SYSTEM.value, "RESEARCH_RESTORED", "Research restored from recycle bin.")
+        return restored
 
     def get_research(self, research_id: str) -> dict[str, Any]:
         research = self.store.get_research(research_id)
@@ -590,51 +660,66 @@ class ResearchService:
         research["hypotheses"] = self.store.list_hypotheses(research_id)
         research["artifact_lineage"] = self.store.list_artifacts(research_id)
         successful = [e for e in research["experiments"] if e["status"] == "SUCCESS" and e["result"]]
-        rank = {"F0": 0, "F1": 1, "F2": 2, "F3": 3}
-        highest = max((rank.get(str(item["fidelity"]).split()[0], 0) for item in successful), default=0)
-        comparable = [item for item in successful
-                      if rank.get(str(item["fidelity"]).split()[0], 0) == highest]
         research["best_experiment"] = min(
-            comparable, key=lambda e: e["result"].get("objective", {}).get("compliance", float("inf")),
+            successful, key=lambda e: e["result"].get("objective", {}).get("compliance", float("inf")),
             default=None,
         )
         return research
 
     def create_experiment(self, research_id: str,
                           request: ExperimentCreate | dict[str, Any]) -> dict[str, Any]:
-        research = self._require_research(research_id)
+        research = self._require_active_research(research_id)
         if research["budget_used"] >= research["budget_total"]:
             raise ValueError("Research budget is exhausted")
         if isinstance(request, ExperimentCreate):
             model = request
         else:
             defaults = (research.get("defaults") or {}).get("experiment", {})
-            seed = {"mesh_level": defaults.get("mesh_level", "coarse"),
+            seed = {"mesh_level": "direct",
                     "parameters": defaults.get("parameters", {})}
             model = ExperimentCreate.model_validate(_deep_merge(seed, request))
-        code = _validate_fidelity_backend(model.fidelity, model.backend)
-        budget = FidelityManager.budget(research, self.store.list_experiments(research_id))
-        if code in {"F0", "F1", "F2", "F3"} and budget["remaining"].get(code, 0) <= 0:
-            raise ValueError(f"No remaining {code} budget")
+        budget = DirectSolverPolicy.budget(research, self.store.list_experiments(research_id))
+        if budget["remaining"]["total"] <= 0:
+            raise ValueError("Research experiment budget is exhausted")
         if budget["time_remaining"] is not None and budget["time_remaining"] <= 0:
             raise ValueError("Research time budget is exhausted")
-        parameters = {**model.parameters, **research["locks"]}
+        if (budget["time_remaining"] is not None and
+                float(model.estimated_seconds or 0) > budget["time_remaining"]):
+            raise ValueError("Experiment exceeds the remaining compute-time budget")
+        if model.backend != "MATLAB_MCP" or model.fidelity != "DIRECT":
+            raise ValueError("New formal experiments must use the DIRECT MATLAB MCP backend")
+        profile = model.solver_profile or DirectSolverPolicy.profile(
+            research, verify=model.intent == "VERIFY_CANDIDATE")
+        dimension = DirectSolverPolicy.dimension(research)
+        if model.dimension != dimension:
+            raise ValueError("Experiment dimension must match the immutable Research Contract")
+        grid = list(profile.get("grid") or [])
+        if len(grid) != dimension or any(int(value) < 2 for value in grid):
+            raise ValueError("Policy produced an invalid direct solver grid")
+        cells = 1
+        for value in grid:
+            cells *= int(value)
+        if cells > (250_000 if dimension == 3 else 100_000):
+            raise ValueError("Direct solver grid exceeds the controlled resource envelope")
+        parameters = {**model.parameters, **research["locks"],
+                      ("grid3d" if dimension == 3 else "grid2d"): grid,
+                      "max_iter": int(profile.get("max_iterations", model.parameters.get("max_iter", 100)))}
         experiment_id = self._next_experiment_id(research_id)
         draft = {"id": experiment_id, "research_id": research_id, **model.model_dump(),
-                 "parameters": parameters,
+                 "parameters": parameters, "dimension": dimension, "solver_profile": profile,
                  "round_number": int(research.get("current_round", 0)) + 1}
-        safety = self.orchestrator.inspect_proposal(draft)
+        safety = self._inspect_proposal(draft)
         if not safety["safe"]:
             self.store.append_event(research_id, EventKind.SAFETY.value, "PROPOSAL REJECTED",
                                     str(safety["reason"]), payload=safety)
             raise ValueError(f"Safety Policy rejected proposal: {safety['reason']}")
-        requires_approval = model.requires_approval or bool(safety["requires_approval"]) or \
-            requires_human_approval(research["mode"], str(safety["risk"]), model.fidelity)
+        requires_approval = research["mode"] == "COPILOT"
         experiment = self.store.create_experiment({
             **draft, "status": ExperimentStatus.WAITING.value, "safety": safety["risk"],
             "requires_approval": bool(requires_approval),
         })
-        body = (f"Purpose: {model.purpose}\n\nFidelity: {model.fidelity}\n\n"
+        body = (f"Purpose: {model.purpose}\n\nDimension: {dimension}D\n\n"
+                f"Solver profile: {json.dumps(profile, ensure_ascii=False)}\n\n"
                 f"Parameters: {json.dumps(parameters, ensure_ascii=False)}")
         self.store.append_event(research_id, EventKind.SAFETY.value, f"PROPOSAL {experiment_id}",
                                 f"Risk: {safety['risk']}\n\n{safety['reason']}", experiment_id, safety)
@@ -645,7 +730,8 @@ class ResearchService:
             self.store.create_decision({
                 "id": decision_id, "research_id": research_id, "experiment_id": experiment_id,
                 "intent": "RUN_EXPERIMENT", "reason": model.purpose,
-                "proposal": {"parameters": parameters, "fidelity": model.fidelity},
+                "proposal": {"parameters": parameters, "dimension": dimension,
+                             "solver_profile": profile},
                 "risk": safety["risk"], "status": DecisionStatus.PENDING.value,
                 "source": model.decision_source, "evidence_ids": model.evidence_ids,
             })
@@ -669,97 +755,121 @@ class ResearchService:
             experiment = self.store.get_experiment(experiment_id)
         return experiment
 
+    def validate_experiment_draft(self, research_id: str, draft: ExperimentDraft | dict[str, Any]) -> dict[str, Any]:
+        """Deterministic preflight for exact human/agent drafts.
+
+        It checks structure, immutable dimension/backend, budget and obvious
+        static hazards.  A passing preflight is not a claim that the solver
+        code is logically correct.
+        """
+        research = self._require_active_research(research_id)
+        model = draft if isinstance(draft, ExperimentDraft) else ExperimentDraft.model_validate(draft)
+        errors: list[str] = []
+        warnings: list[str] = []
+        dimension = DirectSolverPolicy.dimension(research)
+        if model.dimension != dimension:
+            errors.append("dimension must match the immutable Research Contract")
+        if model.backend != "MATLAB_MCP":
+            errors.append("deep experiments must use MATLAB_MCP")
+        if not model.parameters:
+            errors.append("parameters are required")
+        if model.overlay and any(not str(path).replace("\\", "/").startswith("overlay/")
+                                 for path in model.overlay):
+            errors.append("experiment overlay paths must remain below overlay/")
+        max_iter = model.parameters.get("max_iter")
+        if max_iter is not None and (not isinstance(max_iter, int) or max_iter < 1):
+            errors.append("max_iter must be a positive integer")
+        if model.parameters.get("rmin", 1) <= 0:
+            errors.append("rmin must be positive")
+        if model.parameters.get("penal", 3) < 1:
+            warnings.append("penal below 1 may produce an unstable material interpolation")
+        budget = DirectSolverPolicy.budget(research, self.store.list_experiments(research_id))
+        if budget["remaining"]["total"] <= 0:
+            errors.append("Research experiment budget is exhausted")
+        if warnings and not model.static_warnings_confirmed:
+            errors.append("static warnings require explicit confirmation")
+        profile = DirectSolverPolicy.profile(research, verify=model.solver_profile == "verify")
+        estimated = float(profile.get("estimated_seconds") or 0)
+        return {"valid": not errors, "blockingErrors": errors, "warnings": warnings,
+                "estimatedCost": estimated, "budgetAvailable": budget["remaining"]["total"] > 0}
+
+    def create_manual_experiment(self, research_id: str, draft: ExperimentDraft | dict[str, Any]) -> dict[str, Any]:
+        validation = self.validate_experiment_draft(research_id, draft)
+        if not validation["valid"]:
+            raise ValueError("; ".join(validation["blockingErrors"]))
+        model = draft if isinstance(draft, ExperimentDraft) else ExperimentDraft.model_validate(draft)
+        request = ExperimentCreate(
+            purpose=model.purpose, dimension=model.dimension, backend=model.backend,
+            parameters=model.parameters, intent="MANUAL", decision_source="HUMAN",
+            solver_profile=DirectSolverPolicy.profile(
+                self._require_research(research_id), verify=model.solver_profile == "verify"),
+        )
+        experiment = self.create_experiment(research_id, request)
+        # Manual, validated input is not an Agent proposal: approval is not an
+        # extra UI gate.  Persist an approved decision for full auditability.
+        if decision_id := experiment.get("decision_id"):
+            self.approve_decision(decision_id)
+        return self.get_experiment(experiment["id"])
+
     def _experiment_lock(self, experiment_id: str) -> threading.RLock:
         with self._experiment_locks_guard:
-            lock = self._experiment_locks.get(experiment_id)
-            if lock is None:
-                lock = self._experiment_locks[experiment_id] = threading.RLock()
-            return lock
+            return self._experiment_locks.setdefault(experiment_id, threading.RLock())
 
-    def _require_approved_run_decision(self, experiment: dict[str, Any],
-                                       research: dict[str, Any]) -> None:
+    def _require_approved_run_decision(self, experiment: dict[str, Any]) -> None:
         decisions = [
-            item for item in self.store.list_decisions(research["id"])
+            item for item in self.store.list_decisions(experiment["research_id"])
             if item.get("experiment_id") == experiment["id"]
             and item.get("intent") == "RUN_EXPERIMENT"
         ]
-        requires_approval = requires_human_approval(
-            str(research["mode"]),
-            str(experiment.get("safety", "LOW")),
-            str(experiment["fidelity"]),
-        )
-        if not bool(experiment.get("requires_approval")) and not requires_approval and not decisions:
+        if not experiment.get("requires_approval") and not decisions:
             return
-        current = decisions[-1] if decisions else None
-        status = str(current["status"]) if current else "MISSING"
+        status = str(decisions[-1]["status"]) if decisions else "MISSING"
         if status != DecisionStatus.APPROVED.value:
             raise ValueError(
                 f"Experiment {experiment['id']} requires an explicit APPROVED decision "
                 f"in Research State (current: {status})"
             )
 
-    def _claim_experiment_for_run(self, experiment_id: str) -> tuple[dict[str, Any], dict[str, Any], bool]:
+    def _fail_unsubmitted_claim(self, experiment_id: str, exc: Exception) -> None:
+        with self._experiment_lock(experiment_id):
+            self.store.fail_unsubmitted_claim(experiment_id, str(exc))
+
+    def run_experiment(self, experiment_id: str) -> dict[str, Any]:
         with self._experiment_lock(experiment_id):
             experiment = self.get_experiment(experiment_id)
-            research = self._require_research(experiment["research_id"])
-            _validate_fidelity_backend(experiment["fidelity"], experiment["backend"])
-            self._require_approved_run_decision(experiment, research)
+            research = self._require_active_research(experiment["research_id"])
+            self._require_approved_run_decision(experiment)
             if research["status"] in {"PAUSED", "STOPPED"}:
                 raise ValueError(f"Research is {research['status'].lower()}")
             if experiment["status"] not in {"WAITING", "FAILED", "CANCELLED"}:
-                return experiment, research, False
+                return experiment
             claim_id = f"claim_{uuid.uuid4().hex[:12]}"
             if not self.store.claim_experiment_for_run(experiment_id, claim_id):
-                current = self.store.get_experiment(experiment_id)
-                if current is None:
-                    raise KeyError(f"Experiment {experiment_id} does not exist")
-                return current, research, False
-            claimed = self.store.get_experiment(experiment_id)
-            if claimed is None:
-                raise KeyError(f"Experiment {experiment_id} does not exist")
-            return claimed, research, True
-
-    def _prepare_claimed_experiment(self, experiment: dict[str, Any],
-                                    research: dict[str, Any]) -> tuple[dict, dict, Any]:
-        task = build_solver_task(experiment, research)
-        if experiment.get("warm_start"):
-            source = self.store.get_experiment(experiment["warm_start"])
-            density = ((source or {}).get("result") or {}).get("artifacts", {}).get("density")
-            if density is not None:
-                task["params"]["initial_density"] = density
-        cache_task = {**task, "backend": experiment["backend"]}
-        fidelity_code = str(experiment.get("fidelity", "F0")).split()[0]
-        solver_entry = self.project_root / (
-            "求解器模块/TopOpt-3D/TopOpt-3D/topopt3d_main.m"
-            if fidelity_code in {"F2", "F3"} else
-            "求解器模块/2D/TopOpt_integrated/TopOpt_integrated/topopt_main.m")
-        if solver_entry.is_file():
-            cache_task["solver_entry_sha256"] = hashlib.sha256(solver_entry.read_bytes()).hexdigest()
-        contract_raw = json.dumps(research.get("contract", {}), sort_keys=True,
-                                  ensure_ascii=False, default=str).encode("utf-8")
-        cache_task["research_contract_sha256"] = hashlib.sha256(contract_raw).hexdigest()
-        cached = self.cache.get(cache_task)
-        if experiment["backend"] == "matlab" and cached is not None:
-            backend = str((cached.get("solver") or {}).get("backend", ""))
-            if not backend.startswith("matlab_mcp_"):
-                cached = None
-        return task, cache_task, cached
-
-    def _fail_unsubmitted_claim(self, experiment_id: str, exc: Exception) -> None:
-        with self._experiment_lock(experiment_id):
-            current = self.store.get_experiment(experiment_id)
-            if current and current["status"] == "RUNNING" and str(current.get("run_id", "")).startswith("claim_"):
-                self.store.update_experiment(
-                    experiment_id, status="FAILED", progress=1.0,
-                    completed_at=utc_now(), error=str(exc),
-                )
-
-    def run_experiment(self, experiment_id: str) -> dict[str, Any]:
-        experiment, research, claimed = self._claim_experiment_for_run(experiment_id)
-        if not claimed:
-            return experiment
+                return self.get_experiment(experiment_id)
+            experiment = self.get_experiment(experiment_id)
         try:
-            task, cache_task, cached = self._prepare_claimed_experiment(experiment, research)
+            task = build_solver_task(experiment, research)
+            if experiment.get("warm_start"):
+                source = self.store.get_experiment(experiment["warm_start"])
+                density = ((source or {}).get("result") or {}).get("artifacts", {}).get("density")
+                if density is not None:
+                    task["params"]["initial_density"] = density
+            cache_task = {**task, "backend": experiment["backend"]}
+            dimension = int(experiment.get("dimension") or DirectSolverPolicy.dimension(research))
+            solver_entry = self.project_root / (
+                "求解器模块/TopOpt-3D/TopOpt-3D/topopt3d_main.m"
+                if dimension == 3 else
+                "求解器模块/2D/TopOpt_integrated/TopOpt_integrated/topopt_main.m")
+            if solver_entry.is_file():
+                cache_task["solver_entry_sha256"] = hashlib.sha256(solver_entry.read_bytes()).hexdigest()
+            contract_raw = json.dumps(research.get("contract", {}), sort_keys=True,
+                                      ensure_ascii=False, default=str).encode("utf-8")
+            cache_task["research_contract_sha256"] = hashlib.sha256(contract_raw).hexdigest()
+            cached = self.cache.get(cache_task)
+            if experiment["backend"] == "MATLAB_MCP" and cached is not None:
+                backend = str((cached.get("solver") or {}).get("backend", ""))
+                if not backend.startswith("matlab_mcp_"):
+                    cached = None
         except Exception as exc:
             self._fail_unsubmitted_claim(experiment_id, exc)
             raise
@@ -767,25 +877,18 @@ class ResearchService:
             from concurrent.futures import Future
             future = Future()
             future.set_result(cached)
-            try:
-                self.store.update_experiment(experiment_id, run_id="cache_hit", progress=1.0, cached=1,
-                                             result_source="CACHED_REAL_RESULT")
-            except Exception as exc:
-                self._fail_unsubmitted_claim(experiment_id, exc)
-                raise
+            self.store.update_experiment(experiment_id, run_id="cache_hit",
+                                         progress=1.0, cached=1,
+                                         result_source="CACHED_REAL_RESULT")
             self._complete_experiment(experiment_id, "cache_hit", future, cache_task)
             return self.get_experiment(experiment_id)
         try:
-            if experiment["backend"] == "matlab":
+            if experiment["backend"] == "MATLAB_MCP":
                 run_id, _ = self.matlab_worker.submit(
                     task, research["id"], experiment_id,
                     done=lambda rid, future: self._complete_experiment(
                         experiment_id, rid, future, cache_task),
                 )
-                self.store.append_event(research["id"], EventKind.EXPERIMENT.value,
-                                        "MATLAB MCP STARTED",
-                                        "Approved task was dispatched to the restricted topopt_run_task MCP tool.",
-                                        experiment_id, {"backend": "matlab_mcp", "tool": "topopt_run_task"})
             else:
                 run_id = self.queue.submit(
                     task, backend=experiment["backend"],
@@ -795,22 +898,19 @@ class ResearchService:
         except Exception as exc:
             self._fail_unsubmitted_claim(experiment_id, exc)
             raise
-        try:
-            persisted = self.store.update_experiment(experiment_id, run_id=run_id,
-                                                     result_source="LIVE_REAL_RUN")
-            if not persisted or persisted.get("run_id") != run_id:
-                raise RuntimeError("run_id update did not persist")
-        except Exception as exc:
-            claim_id = experiment.get("run_id")
-            raise RuntimeError(
-                f"Solver was submitted as {run_id}, but run_id persistence failed; "
-                f"durable claim remains {claim_id}"
-            ) from exc
-        self.store.update_research(research["id"], status="RUNNING",
-                                   budget_used=research["budget_used"] + 1)
+        # From this point onward a real solver job exists.  Never release the
+        # reservation or rewrite the claim as a pre-submit failure if state
+        # persistence later fails; the completion callback remains authoritative.
+        self.store.update_experiment(experiment_id, run_id=run_id,
+                                     result_source="LIVE_REAL_RUN")
+        if experiment["backend"] == "MATLAB_MCP":
+            self.store.append_event(research["id"], EventKind.EXPERIMENT.value,
+                                    "MATLAB MCP STARTED",
+                                    "Approved task was dispatched to the restricted topopt_run_task MCP tool.",
+                                    experiment_id, {"backend": "matlab_mcp", "tool": "topopt_run_task"})
         self.store.append_event(research["id"], EventKind.EXPERIMENT.value,
                                 f"EXPERIMENT {experiment_id} STARTED",
-                                f"{experiment['fidelity']} is running in the background.", experiment_id)
+                                f"Direct MATLAB {dimension}D solve is running in the background.", experiment_id)
         return self.get_experiment(experiment_id)
 
     def _sync_progress(self, experiment: dict[str, Any]) -> None:
@@ -839,7 +939,7 @@ class ResearchService:
                 return
             try:
                 result = future.result()
-                analysis = self.orchestrator.analyze(research, result)
+                analysis = self._analyze_result(research, result)
                 result["evaluation"] = analysis["evaluation"]
                 if run_id != "cache_hit":
                     self.cache.put(cache_task or {**build_solver_task(experiment, research),
@@ -869,7 +969,7 @@ class ResearchService:
                                         "NEXT DECISION", analysis["feedback"], experiment_id)
             except Exception as exc:
                 failure_type = ("MATLAB_INFRASTRUCTURE" if isinstance(exc, MatlabMcpError)
-                                or experiment["backend"] == "matlab" else "INFRASTRUCTURE")
+                                or experiment["backend"] == "MATLAB_MCP" else "INFRASTRUCTURE")
                 failure_result = {
                     "status": "failed", "objective": {}, "constraints": {}, "quality": {},
                     "solver": {"backend": experiment["backend"], "iterations": 0,
@@ -884,7 +984,7 @@ class ResearchService:
                                         f"EXPERIMENT {experiment_id} FAILED", str(exc), experiment_id,
                                         {"failure_type": failure_type,
                                          "matlab_health": (self.matlab_worker.health()
-                                                           if experiment["backend"] == "matlab" else None),
+                                                           if experiment["backend"] == "MATLAB_MCP" else None),
                                          "failed_at": utc_now()})
             running = [e for e in self.store.list_experiments(research["id"])
                        if e["status"] in {"WAITING", "RUNNING"} and e["run_id"]]
@@ -898,7 +998,7 @@ class ResearchService:
                     self.store.append_event(
                         research["id"], EventKind.SYSTEM.value, "ROUND REPORT READY",
                         round_paths["markdown"], payload=round_paths,
-                        source="REPORT_WRITER", event_type="REPORT_READY")
+                        source="DETERMINISTIC_REPORT", event_type="REPORT_READY")
                 except Exception as report_error:
                     self.store.append_event(research["id"], EventKind.SYSTEM.value,
                                             "ROUND REPORT FAILED", str(report_error))
@@ -911,20 +1011,15 @@ class ResearchService:
                     try:
                         final_paths = self.report_generator.generate(self.get_research(research["id"]))
                         self.store.append_event(
-                            research["id"], EventKind.SYSTEM.value, "FINAL REPORT READY",
+                            research["id"], EventKind.SYSTEM.value, "FINAL FACT DRAFT READY",
                             str(final_paths["markdown"]),
                             payload={key: str(value) for key, value in final_paths.items()},
-                            source="REPORT_WRITER", event_type="REPORT_READY")
+                            source="DETERMINISTIC_REPORT", event_type="REPORT_DRAFT_READY")
                     except Exception as report_error:
                         self.store.append_event(research["id"], EventKind.SYSTEM.value,
                                                 "FINAL REPORT FAILED", str(report_error))
                     if self.pi_runtime:
-                        self.pi_runtime.subagents.dispatch(
-                            research["id"], "INDEPENDENT_REVIEWER",
-                            "Audit whether the deterministic evidence supports the termination and conclusion.")
-                        self.pi_runtime.subagents.dispatch(
-                            research["id"], "REPORT_WRITER",
-                            "Review the final deterministic report for evidence attribution and missing values.")
+                        self._dispatch_final_review(research["id"], termination)
                 elif current["mode"] == "AUTONOMOUS":
                     completed_items = [item for item in self.store.list_experiments(research["id"])
                                        if item.get("completed_at")]
@@ -935,8 +1030,8 @@ class ResearchService:
                     prompt = (
                         f"EXPERIMENT_BATCH_COMPLETED: {completed_ids[-6:]}. Read structured results, "
                         "search relevant offline knowledge and inspect solver capabilities. Dispatch the "
-                        "HYPOTHESIS Subagent for competing explanations and the EXPERIMENT_PLANNER Subagent "
-                        "for proposal review, then choose the next scientific intent. You must call "
+                        "SCIENTIST Subagent for competing explanations and proposal review, then choose "
+                        "the next scientific intent. You must call "
                         "policy_compile_intent; do not invent numeric parameters. Submit the complete safe "
                         "controlled batch within budget, or state a termination reason."
                     )
@@ -1028,6 +1123,7 @@ class ResearchService:
 
     def approve_decision(self, decision_id: str) -> dict[str, Any]:
         decision = self._require_decision(decision_id)
+        self._require_active_research(decision["research_id"])
         experiment_id = decision.get("experiment_id")
         lock = self._experiment_lock(experiment_id) if experiment_id else self._completion_lock
         with lock:
@@ -1048,13 +1144,14 @@ class ResearchService:
 
     def edit_pending_experiment(self, experiment_id: str, parameters: dict[str, Any]) -> dict[str, Any]:
         experiment = self.get_experiment(experiment_id)
+        self._require_active_research(experiment["research_id"])
         decision = next((item for item in self.store.list_decisions(experiment["research_id"])
                          if item.get("experiment_id") == experiment_id and item["status"] == "PENDING"), None)
         if not decision:
             raise ValueError("Only a pending proposal can be edited")
         merged = {**experiment["parameters"], **parameters,
                   **self._require_research(experiment["research_id"])["locks"]}
-        safety = self.orchestrator.inspect_proposal({**experiment, "parameters": merged})
+        safety = self._inspect_proposal({**experiment, "parameters": merged})
         if not safety["safe"]:
             self.store.append_event(experiment["research_id"], EventKind.SAFETY.value,
                                     "EDIT REJECTED", str(safety["reason"]), experiment_id, safety)
@@ -1070,6 +1167,7 @@ class ResearchService:
 
     def reject_decision(self, decision_id: str) -> dict[str, Any]:
         decision = self._require_decision(decision_id)
+        self._require_active_research(decision["research_id"])
         experiment_id = decision.get("experiment_id")
         lock = self._experiment_lock(experiment_id) if experiment_id else self._completion_lock
         with lock:
@@ -1094,7 +1192,7 @@ class ResearchService:
         text = text.strip()
         if not text:
             return WorkspaceCommandResult(ok=False, message="Command is empty")
-        self._require_research(research_id)
+        self._require_active_research(research_id)
         if not text.startswith("/"):
             self.store.append_event(research_id, EventKind.USER.value, "USER", text)
             self.store.update_research(research_id, current_question=text)
@@ -1114,7 +1212,7 @@ class ResearchService:
             "/compare": lambda: self._command_compare(research_id, args),
             "/lock": lambda: self._command_lock(research_id, args),
             "/unlock": lambda: self._command_unlock(research_id, args),
-            "/promote": lambda: self._command_promote(research_id, args),
+            "/verify": lambda: self._command_verify(research_id, args),
             "/retry": lambda: self._command_retry(research_id, args),
             "/report": lambda: self._command_report(research_id),
             "/export": lambda: self._command_export(research_id),
@@ -1139,6 +1237,15 @@ class ResearchService:
                                       data={"experiment_id": target["id"]})
 
     def _set_research_status(self, research_id: str, status: str) -> WorkspaceCommandResult:
+        if status == "PAUSED" and self.pi_runtime:
+            # Abort the current atomic prompt; do not leave a paused process
+            # able to submit a delayed proposal after the UI has paused it.
+            process = self.pi_runtime.processes.get(research_id)
+            if process:
+                try:
+                    process.abort()
+                except Exception:
+                    self.pi_runtime.release(research_id)
         self.store.update_research(research_id, status=status)
         self.store.append_event(research_id, EventKind.SYSTEM.value, status, f"Research is now {status}.")
         return WorkspaceCommandResult(ok=True, message=f"Research {status.lower()}.", action=status.lower())
@@ -1148,6 +1255,8 @@ class ResearchService:
             if experiment["status"] in {"WAITING", "RUNNING"} and experiment["run_id"]:
                 self.queue.cancel(experiment["run_id"])
                 self.store.update_experiment(experiment["id"], status="CANCELLED")
+        if self.pi_runtime:
+            self.pi_runtime.release(research_id)
         return self._set_research_status(research_id, "STOPPED")
 
     def _pending_decision(self, research_id: str) -> dict[str, Any]:
@@ -1196,26 +1305,25 @@ class ResearchService:
 
     def _command_rollback(self, research_id: str, args: list[str]) -> WorkspaceCommandResult:
         source = self._experiment_arg(research_id, args, "/rollback <experiment>")
-        clone = ExperimentCreate(purpose=f"Rollback from {source['id']}", fidelity=source["fidelity"],
-                                 mesh_level=source["mesh_level"], backend=source["backend"],
-                                 parameters=source["parameters"], warm_start=source["id"])
+        clone = ExperimentCreate(
+            purpose=f"Rollback from {source['id']}", dimension=source["dimension"],
+            solver_profile=source["solver_profile"], backend="MATLAB_MCP",
+            parameters=source["parameters"], warm_start=source["id"],
+            execution_mode=self._require_research(research_id)["mode"])
         new = self.create_experiment(research_id, clone)
         return WorkspaceCommandResult(ok=True, message=f"Created {new['id']} from {source['id']}.",
                                       action="select", data={"experiment_id": new["id"]})
 
-    def _command_promote(self, research_id: str, args: list[str]) -> WorkspaceCommandResult:
-        source = self._experiment_arg(research_id, args, "/promote <experiment>")
-        current = str(source["fidelity"]).split()[0]
-        target = FidelityManager().promote_code(current)
-        labels = {"F0": "F0 — MATLAB 2D Coarse", "F1": "F1 — MATLAB 2D Fine",
-                  "F2": "F2 — MATLAB 3D Coarse", "F3": "F3 — MATLAB 3D Fine"}
-        promoted = ExperimentCreate(purpose=f"Promote {source['id']} to {target}",
-                                    fidelity=labels[target], mesh_level=FidelityManager.mesh_level(target),
-                                    backend=FidelityManager.backend_for(target), parameters=source["parameters"],
-                                    warm_start=source["id"], requires_approval=target == "F3",
-                                    intent="UPGRADE_FIDELITY")
-        new = self.create_experiment(research_id, promoted)
-        return WorkspaceCommandResult(ok=True, message=f"Created promoted run {new['id']}.",
+    def _command_verify(self, research_id: str, args: list[str]) -> WorkspaceCommandResult:
+        source = self._experiment_arg(research_id, args, "/verify <experiment>")
+        research = self._require_research(research_id)
+        profile = DirectSolverPolicy.profile(research, verify=True)
+        verified = ExperimentCreate(
+            purpose=f"Verify candidate {source['id']}", dimension=DirectSolverPolicy.dimension(research),
+            solver_profile=profile, backend="MATLAB_MCP", parameters=source["parameters"],
+            warm_start=source["id"], intent="VERIFY_CANDIDATE", execution_mode=research["mode"])
+        new = self.create_experiment(research_id, verified)
+        return WorkspaceCommandResult(ok=True, message=f"Created verification run {new['id']}.",
                                       action="select", data={"experiment_id": new["id"]})
 
     def _command_retry(self, research_id: str, args: list[str]) -> WorkspaceCommandResult:
@@ -1235,9 +1343,46 @@ class ResearchService:
         return experiment
 
     def _command_report(self, research_id: str) -> WorkspaceCommandResult:
+        research = self._require_research(research_id)
+        termination = research.get("termination_reason")
+        if termination:
+            if self.pi_runtime and self.pi_runtime.health()["available"]:
+                task = self._dispatch_final_review(research_id, termination)
+                return WorkspaceCommandResult(
+                    ok=True,
+                    message="Final report is waiting for an isolated Independent Reviewer verdict.",
+                    action="review_pending",
+                    data={"task_id": task["id"]},
+                )
+            self.store.update_research(research_id, status="PAUSED")
+            self.store.append_event(
+                research_id, EventKind.SYSTEM.value, "FINAL REVIEW UNAVAILABLE",
+                "Final report generation is blocked until the Independent Reviewer runtime is available.",
+                source="AGENT", event_type="REVIEW_PENDING",
+            )
+            return WorkspaceCommandResult(
+                ok=False,
+                message="Independent Reviewer is unavailable; final report generation remains blocked.",
+                action="review_pending",
+                data={"reason": "reviewer_unavailable"},
+            )
         path = self.generate_report(research_id)
         return WorkspaceCommandResult(ok=True, message=f"Report generated: {path}", action="report",
                                       data={"path": str(path)})
+
+    def _dispatch_final_review(self, research_id: str, termination: str) -> dict[str, Any]:
+        marker = "FINAL_REVIEW:"
+        for task in reversed(self.store.list_subagent_tasks(research_id)):
+            if (task.get("status") in {"QUEUED", "RUNNING"}
+                    and str(task.get("objective", "")).startswith(marker)):
+                return task
+        return self.pi_runtime.subagents.dispatch(
+            research_id, "INDEPENDENT_REVIEWER",
+            f"{marker} Audit whether deterministic evidence supports the recorded research "
+            f"termination reason {termination} and the final conclusion. Your first token must be "
+            "APPROVE, REVISE, or REJECT. APPROVE only if termination itself is justified. "
+            "If a comparison is uncontrolled, prohibit causal attribution explicitly; use REVISE "
+            "when the fact draft overclaims it. Otherwise use REJECT and state the correction.")
 
     def _command_export(self, research_id: str) -> WorkspaceCommandResult:
         report = self.generate_report(research_id)
@@ -1275,7 +1420,7 @@ class ResearchService:
         self.store.append_event(
             research_id, EventKind.SYSTEM.value, "REPORT GENERATED", str(paths["markdown"]),
             payload={key: str(value) for key, value in paths.items()},
-            source="REPORT_WRITER", event_type="REPORT_READY")
+            source="DETERMINISTIC_REPORT", event_type="REPORT_READY")
         return paths["markdown"]
 
     def generate_round_report(self, research_id: str, round_number: int) -> dict[str, str]:
@@ -1283,6 +1428,16 @@ class ResearchService:
         return {key: str(value) for key, value in paths.items()}
 
     def report_path(self, research_id: str, kind: str = "markdown") -> Path:
+        approved = any(
+            task.get("role") == "INDEPENDENT_REVIEWER"
+            and str(task.get("objective", "")).startswith("FINAL_REVIEW:")
+            and str(task.get("result", {}).get("text", "")).lstrip().upper().startswith("APPROVE")
+            for task in self.store.list_subagent_tasks(research_id)
+        )
+        ready = any(event.get("event_type") == "REPORT_READY"
+                    for event in self.store.list_events(research_id))
+        if not (approved and ready):
+            raise ValueError("FINAL_REPORT_NOT_READY: an APPROVE final review and REPORT_READY are required")
         paths = self.report_generator.generate(self.get_research(research_id))
         return paths["pdf" if kind == "pdf" else "markdown"]
 
@@ -1296,7 +1451,7 @@ class ResearchService:
         return values
 
     def guide_research(self, research_id: str, text: str) -> dict[str, Any]:
-        self._require_research(research_id)
+        self._require_active_research(research_id)
         if not self.pi_runtime:
             entries = self.knowledge.search(text, self._require_research(research_id).get("locale", "zh-CN"), limit=5)
             return {"status": "KNOWLEDGE_ONLY", "task": None, "knowledge": entries,
@@ -1326,18 +1481,16 @@ class ResearchService:
     def solver_capabilities(self) -> dict[str, Any]:
         health = self.matlab_worker.health()
         runtime = self.matlab_worker.capabilities(probe=False)
-        profiles = []
-        for code, dimension, mesh in (("F0", 2, "coarse"), ("F1", 2, "fine"),
-                                      ("F2", 3, "coarse3d"), ("F3", 3, "fine3d")):
-            profiles.append({
-                "fidelity": code, "dimension": dimension, "mesh_level": mesh,
-                "backend": "matlab", "available": health.get("state") == "READY",
-                "variants": runtime.get("variants", ["reference_cpu"]),
-                "selected_variant": runtime.get("selected_variant", "reference_cpu"),
-                "acceleration_mode": runtime.get("acceleration_mode", "cpu"),
-                "requires_human_approval": code == "F3",
-            })
-        return {"matlab": health, "runtime": runtime, "fidelities": profiles,
+        profiles = [{
+            "dimension": dimension,
+            "solver_profile": DirectSolverPolicy.profile(
+                {"geometry": {"dimension": f"{dimension}D"}}),
+            "backend": "MATLAB_MCP", "available": health.get("state") == "READY",
+            "variants": runtime.get("variants", ["reference_cpu"]),
+            "selected_variant": runtime.get("selected_variant", "reference_cpu"),
+            "acceleration_mode": runtime.get("acceleration_mode", "cpu"),
+        } for dimension in (2, 3)]
+        return {"matlab": health, "runtime": runtime, "profiles": profiles,
                 "strict_matlab": True, "python_fallback": False}
 
     def preview_geometry(self, request: dict[str, Any]) -> dict[str, Any]:
@@ -1348,38 +1501,85 @@ class ResearchService:
         value = {**self.matlab_worker.health(), "capabilities": self.matlab_worker.capabilities(probe=False)}
         if value.get("state") == "AVAILABLE":
             value["state"] = "CONFIGURED"
-        if self._matlab_restart["running"]:
+        with self._matlab_restart_lock:
+            restart = dict(self._matlab_restart)
+        if restart["running"]:
             value["state"] = "STARTING"
-        if self._matlab_restart["last_error"]:
-            value["last_error"] = self._matlab_restart["last_error"]
-        value["restart"] = dict(self._matlab_restart)
+        elif restart["last_error"]:
+            value["state"] = "DEGRADED" if value.get("process_running") else "FAILED"
+        if restart["last_error"]:
+            value["last_error"] = restart["last_error"]
+        value["restart"] = restart
         return value
 
     def restart_matlab(self) -> dict[str, Any]:
-        if not self._matlab_restart["running"]:
-            self._matlab_restart = {"running": True, "last_error": None, "updated_at": utc_now()}
+        should_start = False
+        now = utc_now()
+        with self._matlab_restart_lock:
+            stale = False
+            if self._matlab_restart["running"]:
+                # A restart job that has not reported progress for longer than
+                # any legitimate phase allows (handshake 30s x2 + probe <=120s)
+                # is treated as wedged so the user can retry from the UI.
+                try:
+                    updated = datetime.fromisoformat(self._matlab_restart.get("updated_at"))
+                    stale = (datetime.now(timezone.utc) - updated).total_seconds() > _MATLAB_RESTART_STALE_SECONDS
+                except (TypeError, ValueError):
+                    stale = True
+            if stale or not self._matlab_restart["running"]:
+                self._matlab_restart = {
+                    "running": True, "phase": "QUEUED", "attempt_id": uuid.uuid4().hex,
+                    "started_at": now, "last_error": None, "warmup": None,
+                    "updated_at": now,
+                }
+                should_start = True
+        if should_start:
             threading.Thread(target=self._restart_matlab_job, name="matlab-mcp-restart", daemon=True).start()
         return self.matlab_health()
 
+    def _update_matlab_restart(self, **changes: Any) -> None:
+        with self._matlab_restart_lock:
+            self._matlab_restart.update(changes)
+            self._matlab_restart["updated_at"] = utc_now()
+
     def _restart_matlab_job(self) -> None:
-        settings = self.get_settings()["compute"]
         error = None
         warmup = None
         try:
+            settings = self.get_settings()["compute"]
+            self._update_matlab_restart(phase="CONFIGURING")
             self.matlab_worker.configure(matlab_root=settings.get("matlab_root"),
-                                         timeout=settings["matlab_timeout_seconds"])
+                                         timeout=settings["matlab_timeout_seconds"], start=False)
             # Cold-start the MCP process and MATLAB session and probe capabilities so
             # the first real experiment does not pay MATLAB startup latency.
-            warmup = self.matlab_worker.warmup()
+            self._update_matlab_restart(phase="STARTING_MCP")
+            self.matlab_worker.start()
+            self._update_matlab_restart(phase="PROBING_CAPABILITIES")
+            probe_timeout = min(float(settings["matlab_timeout_seconds"]), 120.0)
+            warmup = self.matlab_worker.warmup(probe_timeout=probe_timeout)
+            if not warmup.get("capabilities", {}).get("probed"):
+                raise RuntimeError("MATLAB capability probe returned no verified capabilities")
         except Exception as exc:
-            error = str(exc)[:1000]
-        self._matlab_restart = {"running": False, "last_error": error,
-                                "warmup": warmup, "updated_at": utc_now()}
+            error = str(exc)[:2000]
+        finally:
+            # Always release the restart flag so a wedged job can never pin
+            # state=STARTING forever and block future restart attempts.
+            self._update_matlab_restart(running=False, phase="FAILED" if error else "READY",
+                                        last_error=error, warmup=warmup)
 
     def _answer_question(self, research_id: str, text: str, selected: str | None) -> str:
         research = self._require_research(research_id)
         zh = research.get("locale", "zh-CN") == "zh-CN"
         language = "Simplified Chinese" if zh else "English"
+        route = self._question_route(text, selected)
+        if route == "GUIDE" and self.pi_runtime and self.pi_runtime.health()["available"]:
+            task = self.pi_runtime.subagents.guide(research_id, text)
+            self.store.append_event(
+                research_id, EventKind.SYSTEM.value, "QUESTION ROUTED TO GUIDE",
+                f"Independent Guide task {task['id']} owns this simple question.",
+                payload={"route": "GUIDE", "task_id": task["id"]}, source="ROUTER")
+            return (("[GUIDE] 已交给独立向导会话处理；回复会出现在时间线中。") if zh else
+                    "[GUIDE] Routed to the isolated Guide session; its reply will appear in the timeline.")
         if self.pi_runtime and self.pi_runtime.health()["available"]:
             context = self.tools.research_get_context(research_id)
             message = (
@@ -1422,6 +1622,22 @@ class ResearchService:
         return self._fallback_answer(experiment)
 
     @staticmethod
+    def _question_route(text: str, selected: str | None = None) -> str:
+        if selected:
+            return "RESEARCH_LEAD"
+        value = text.lower()
+        research_terms = (
+            "实验结果", "下一轮", "下一步实验", "假设", "柔度", "收敛", "灰度率",
+            "连通性", "约束调整", "修改约束", "对比实验", "为什么失败", "compliance",
+            "convergence", "hypothesis", "next experiment", "experiment result", "compare",
+            "constraint", "evaluator", "e01", "e02", "e03", "e04", "e05",
+            "research lead", "科研主智能体", "开始实验", "开始第一轮", "规划实验",
+            "建立基线", "提交实验", "policy", "establish_baseline",
+            "verify_candidate", "test_competing_explanations",
+        )
+        return "RESEARCH_LEAD" if any(term in value for term in research_terms) else "GUIDE"
+
+    @staticmethod
     def _fallback_answer(experiment: dict[str, Any] | None) -> str:
         if experiment and experiment["result"]:
             q = experiment["result"].get("quality", {})
@@ -1449,6 +1665,12 @@ class ResearchService:
         research = self.store.get_research(research_id)
         if not research:
             raise KeyError(f"Research {research_id} does not exist")
+        return research
+
+    def _require_active_research(self, research_id: str) -> dict[str, Any]:
+        research = self._require_research(research_id)
+        if research.get("archived_at"):
+            raise ValueError("RESEARCH_ARCHIVED: restore the Research before modifying it")
         return research
 
     def _require_decision(self, decision_id: str) -> dict[str, Any]:

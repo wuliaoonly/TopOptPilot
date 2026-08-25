@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 
-def evaluate_safety(parameters: dict[str, Any], fidelity: str = "") -> dict[str, str | bool]:
+def evaluate_safety(parameters: dict[str, Any]) -> dict[str, str | bool]:
     beta = float(parameters.get("beta", parameters.get("beta_max", 1)))
     rmin = float(parameters.get("rmin", 1.5))
     max_iter = int(parameters.get("max_iter", 80))
@@ -38,14 +38,9 @@ def evaluate_safety(parameters: dict[str, Any], fidelity: str = "") -> dict[str,
     if beta >= 16 and rmin < 2.0:
         risk = "MEDIUM"
         reasons.append("High beta with a narrow filter radius can increase disconnection risk.")
-    fidelity_code = str(fidelity).upper().split()[0] if fidelity else ""
-    if fidelity_code == "F3":
-        risk = "HIGH"
-        requires_approval = True
-        reasons.append("MATLAB high-fidelity execution consumes protected compute budget.")
-    elif fidelity_code == "F2" or max_iter > 250:
+    if max_iter > 250:
         risk = "MEDIUM"
-        reasons.append("3D or long execution consumes protected compute budget.")
+        reasons.append("Long execution consumes protected compute budget.")
     return {
         "risk": risk,
         "safe": not violations,
