@@ -318,7 +318,7 @@ class ResearchStateStore:
               (id,workspace_id,lane,owner_type,owner_id,actor_type,actor_role,phase,status,title,summary,
                related_run_id,experiment_id,proposal_id,task_id,evidence_ids_json,requires_human_action,
                sanitized_tool_call_json,error,created_at,updated_at)
-              VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+              VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
               (data["id"], data["workspace_id"], data["lane"], data["owner_type"], data["owner_id"],
                data.get("actor_type", "agent"), data.get("actor_role", "SYSTEM"), data["phase"],
                data["status"], data["title"], data.get("summary", ""), data.get("related_run_id"),
