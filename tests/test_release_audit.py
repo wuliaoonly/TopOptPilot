@@ -12,6 +12,14 @@ def test_artifact_gate_uses_generated_canonical_tool_contract() -> None:
     assert Path(result["generated"]).as_posix().endswith(".pi/generated/topopt-tools.ts")
 
 
+def test_runtime_and_reports_use_v622_branding() -> None:
+    service = (release_audit.ROOT / "topoptpilot/service/research_service.py").read_text(encoding="utf-8")
+    reports = (release_audit.ROOT / "topoptpilot/reports/generator.py").read_text(encoding="utf-8")
+    assert '"version": "6.2.2"' in service
+    assert "TopOptPilot V6.2.2" in reports
+    assert "6.2.1" not in service + reports
+
+
 def test_source_gates_cover_direct_solver_and_shared_stream_tickets() -> None:
     gates = release_audit._source_gates()
     assert gates["direct_solver_schema"]["pass"] is True

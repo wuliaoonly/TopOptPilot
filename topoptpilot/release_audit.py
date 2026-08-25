@@ -32,7 +32,8 @@ def _source_gates() -> dict[str, dict]:
     read = lambda path: (ROOT / path).read_text(encoding="utf-8")
     models, service = read("topoptpilot/schemas/models.py"), read("topoptpilot/service/research_service.py")
     subagents, canvas = read("topoptpilot/agent_runtime/subagents.py"), read("desktop/src/ExperimentCanvas.tsx")
-    setup, store = read("desktop/src/ResearchSetup.tsx"), read("topoptpilot/memory/research_state.py")
+    setup = read("desktop/src/optimization-config.ts") + read("desktop/src/features/engineering/EngineeringWorkspace.tsx")
+    store = read("topoptpilot/memory/research_state.py")
     api, reports = read("topoptpilot/api/fastapi_app.py"), read("topoptpilot/reports/generator.py")
     obsolete = ("UPGRADE_FIDELITY", "FidelityManager", "EXPERIMENT_PLANNER", "EXPERIMENT_EXECUTOR", "REPORT_WRITER")
     return {
@@ -42,7 +43,9 @@ def _source_gates() -> dict[str, dict]:
             "MatlabMcpWorker", 'backend != "MATLAB_MCP"', 'strict_matlab": True',
             '"python_fallback": False')) and not any(marker in service for marker in (
                 "PythonFEMWorker(", "MatlabBackend(", "Matlab3DAdapter("))},
-        "guided_setup": {"pass": "previewGuide" in setup and "AI_SUGGESTED" in setup and "time_seconds" in setup and "f0" not in setup.lower()},
+        "guided_setup": {"pass": all(marker in setup for marker in (
+            "engineeringTaskFromConfig", '"2d" | "3d"', "local-matlab",
+            'filterStrategy: "fixed"')) and "MATLAB_MCP" not in setup},
         "research_canvas": {"pass": all(v in canvas for v in ("HYPOTHESIS", "PLAN", "RUN", "ANALYZE", "COMPARE", "DECIDE", "REPORT"))},
         "agent_provenance": {"pass": all(v in store for v in ("decision_source", "intent_source", "policy_version", "evidence_ids_json"))},
         "websocket_realtime": {"pass": "stream-ticket" in api and "ws_ticket_broker.consume" in api
