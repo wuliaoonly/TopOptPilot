@@ -62,6 +62,22 @@ export default function UnifiedOptimizationWorkspace(props: Props) {
     }).catch(reason => !cancelled && onError(String(reason)));
     return () => { cancelled = true; };
   }, [workspace?.id, lane, researches.length, selectedResearch?.id, selectedExperiment?.id]);
+  useEffect(() => {
+    if (!workspace) return;
+    let disposed = false;
+    let socket: WebSocket | null = null;
+    void api.workspaceStream(workspace.id).then(value => {
+      if (disposed) { value.close(); return; }
+      socket = value;
+      socket.onmessage = event => {
+        try {
+          const payload = JSON.parse(event.data) as { type?: string; items?: AgentWorkflowItem[] };
+          if (payload.type === "workflow" && payload.items) setWorkflow(payload.items);
+        } catch { /* the HTTP projection remains authoritative after a malformed frame */ }
+      };
+    }).catch(reason => !disposed && onError(String(reason)));
+    return () => { disposed = true; socket?.close(); };
+  }, [workspace?.id, onError]);
 
   async function openProject() {
     try {

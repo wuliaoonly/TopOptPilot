@@ -11,11 +11,12 @@ import hashlib
 import hmac
 import os
 import secrets
+import asyncio
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Literal
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field
 
 from topoptpilot.api.ws_tickets import broker as ws_ticket_broker
@@ -206,5 +207,27 @@ def build_workspace_router(service) -> APIRouter:
             raise HTTPException(status_code=404, detail={"code": "WORKSPACE_NOT_FOUND", "message": workspace_id,
                 "source": "API", "retryable": False, "detail": {}})
         return ws_ticket_broker.issue("workspace", workspace_id)
+
+    @router.websocket("/api/workspaces/{workspace_id}/stream")
+    async def workspace_stream(websocket: WebSocket, workspace_id: str):
+        ticket = websocket.query_params.get("ticket", "")
+        if not ws_ticket_broker.consume(ticket, "workspace", workspace_id):
+            await websocket.close(code=4401)
+            return
+        if not service.store.get_workspace(workspace_id):
+            await websocket.close(code=4404)
+            return
+        await websocket.accept()
+        previous = ""
+        try:
+            while True:
+                items = [_public_workflow(item) for item in service.store.list_workflow_items(workspace_id)]
+                fingerprint = repr([(item["workflowItemId"], item["status"], item["updatedAt"]) for item in items])
+                if fingerprint != previous:
+                    previous = fingerprint
+                    await websocket.send_json({"type": "workflow", "items": items})
+                await asyncio.sleep(0.5)
+        except (WebSocketDisconnect, RuntimeError):
+            return
 
     return router

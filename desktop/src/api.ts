@@ -91,6 +91,11 @@ export const api = {
   workspaceWorkflow: (id:string) => request<AgentWorkflowItem[]>("/api/workspaces/" + encodeURIComponent(id) + "/workflow"),
   quickAgentTask: (id:string,prompt:string) => request<QuickAgentTask>("/api/workspaces/" + encodeURIComponent(id) + "/quick-agent/tasks", {method:"POST",body:JSON.stringify({prompt})}),
   cancelQuickAgentTask: (workspaceId:string,taskId:string) => request<QuickAgentTask>("/api/workspaces/" + encodeURIComponent(workspaceId) + "/quick-agent/tasks/" + encodeURIComponent(taskId) + "/cancel", {method:"POST"}),
+  workspaceStream: async (id:string): Promise<WebSocket> => {
+    if (!backend) throw new Error("Backend not initialized");
+    const ticket = await request<{ticket:string}>("/api/workspaces/" + encodeURIComponent(id) + "/stream-ticket", {method:"POST"});
+    return new WebSocket("ws://127.0.0.1:" + backend.port + "/api/workspaces/" + encodeURIComponent(id) + "/stream?ticket=" + encodeURIComponent(ticket.ticket));
+  },
   validateExperimentDraft: (id:string,data:ExperimentDraft) => request<ExperimentDraftValidation>("/api/research/" + encodeURIComponent(id) + "/experiment-drafts/validate", {method:"POST",body:JSON.stringify(data)}),
   createManualExperiment: (id:string,data:ExperimentDraft) => request<Experiment>("/api/research/" + encodeURIComponent(id) + "/experiments/manual", {method:"POST",body:JSON.stringify(data)}),
   restoreResearch: (id: string) => request<import("./generated/api-contract").ResearchArchiveResult<Research>>(`/api/research/${encodeURIComponent(id)}/restore`, { method: "POST" }),
@@ -213,4 +218,5 @@ export const deepApi = {
 export const workspaceApi = {
   list: api.listWorkspaces, create: api.createWorkspace, contexts: api.workspaceContexts,
   conversation: api.workspaceConversation, message: api.workspaceMessage, workflow: api.workspaceWorkflow,
+  stream: api.workspaceStream,
 };
