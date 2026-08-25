@@ -46,6 +46,7 @@ class RunCreateRequest(BaseModel):
     lane: SolverLane
     runtime_profile_id: str | None = Field(default=None, min_length=1, max_length=160)
     owner_id: str = Field(default="engineering", min_length=1, max_length=160)
+    workspace_id: str | None = Field(default=None, min_length=1, max_length=160)
     task: dict[str, Any] = Field(default_factory=dict)
     max_iter: int | None = Field(default=None, ge=1, le=2000)
     time_limit: float | None = Field(default=None, ge=0.1, le=86400)
@@ -58,6 +59,7 @@ class RunCreateRequest(BaseModel):
         if isinstance(value, dict):
             value = dict(value)
             value.setdefault("owner_id", value.pop("ownerId", "engineering"))
+            value.setdefault("workspace_id", value.pop("workspaceId", None))
             value.setdefault("max_iter", value.pop("maxIter", None))
             value.setdefault("time_limit", value.pop("timeLimit", None))
             value.setdefault("runtime_profile_id", value.pop("runtimeProfileId", None))
@@ -127,6 +129,7 @@ class RunCreateRequest(BaseModel):
 class _Run:
     run_id: str
     owner_id: str
+    workspace_id: str | None
     lane: SolverLane
     task: dict[str, Any]
     config_digest: str
@@ -143,7 +146,7 @@ class _Run:
     lock: threading.RLock = field(default_factory=threading.RLock)
 
     def public(self) -> dict[str, Any]:
-        return RunArtifact(
+        value = RunArtifact(
             runId=self.run_id,
             ownerType=OwnerType.ENGINEERING_RUN,
             ownerId=self.owner_id,
@@ -156,6 +159,8 @@ class _Run:
             provenance=self.provenance,
             error=self.error,
         ).model_dump(by_alias=True, mode="json")
+        value["workspaceId"] = self.workspace_id
+        return value
 
 
 class RunManager:
@@ -173,6 +178,7 @@ class RunManager:
                 "schemaVersion": 1,
                 "run": record.public(),
                 "task": record.task,
+                "workspaceId": record.workspace_id,
                 "runtimeProfileId": record.runtime_profile_id,
                 "events": list(record.events),
             }
@@ -199,7 +205,8 @@ class RunManager:
             if artifact.run_id != run_id:
                 return None
             record = _Run(
-                run_id=artifact.run_id, owner_id=artifact.owner_id, lane=artifact.lane,
+                run_id=artifact.run_id, owner_id=artifact.owner_id, workspace_id=payload.get("workspaceId"),
+                lane=artifact.lane,
                 task=dict(payload.get("task") or {}), config_digest=artifact.config_digest,
                 run_dir=run_dir, runtime_profile_id=payload.get("runtimeProfileId"),
                 status=artifact.status, metrics=dict(artifact.metrics),
@@ -225,7 +232,7 @@ class RunManager:
         task = json.loads(json.dumps(request.task, ensure_ascii=False))
         if request.max_iter is not None:
             task.setdefault("params", {})["max_iter"] = request.max_iter
-        canonical = json.dumps({"lane": request.lane.value, "ownerId": request.owner_id,
+        canonical = json.dumps({"lane": request.lane.value, "ownerId": request.owner_id, "workspaceId": request.workspace_id,
                                 "runtimeProfileId": request.runtime_profile_id, "task": task,
                                 "generatedFiles": request.generated_files,
                                 "generatedEntrypoint": request.generated_entrypoint},
@@ -242,7 +249,7 @@ class RunManager:
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_text(content, encoding="utf-8")
             task["_generated_entrypoint"] = request.generated_entrypoint
-        record = _Run(run_id, request.owner_id, request.lane, task, hashlib.sha256(canonical.encode("utf-8")).hexdigest(), run_dir, runtime_profile_id=request.runtime_profile_id)
+        record = _Run(run_id, request.owner_id, request.workspace_id, request.lane, task, hashlib.sha256(canonical.encode("utf-8")).hexdigest(), run_dir, runtime_profile_id=request.runtime_profile_id)
         with self._lock:
             self._runs[run_id] = record
         self.persist(record)
@@ -269,6 +276,20 @@ class RunManager:
             return None
         with self._lock:
             return self._runs.setdefault(run_id, restored)
+
+    def list_workspace(self, workspace_id: str) -> list[_Run]:
+        """Return persisted Quick runs for one workspace without trusting paths."""
+        root = _data_root()
+        if not root.is_dir():
+            return []
+        records: list[_Run] = []
+        for child in root.iterdir():
+            if not child.is_dir():
+                continue
+            record = self.get(child.name)
+            if record and record.workspace_id == workspace_id:
+                records.append(record)
+        return sorted(records, key=lambda item: item.run_id, reverse=True)
 
     def cancel(self, run_id: str) -> _Run:
         record = self.get(run_id)

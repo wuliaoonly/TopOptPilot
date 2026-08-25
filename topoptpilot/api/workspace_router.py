@@ -124,9 +124,11 @@ def build_workspace_router(service) -> APIRouter:
             "status": "draft", "workspaceId": workspace_id,
         }]
         if mode == "quick":
-            # The run manager remains the source of run details.  Its manifests
-            # can be absent after a user clears data, so the workspace projection
-            # intentionally degrades to the durable draft rather than inventing a run.
+            from idesktop_v2.engineering.runs import manager as run_manager
+            for run in run_manager.list_workspace(workspace_id):
+                contexts.append({"id": run.run_id, "type": "quick_run", "title": run.task.get("name") or run.run_id,
+                    "status": run.status.value, "workspaceId": workspace_id, "runId": run.run_id,
+                    "sourceSummary": "immutable Quick Run manifest"})
             return contexts
         for research in service.store.list_research(workspace_id=workspace_id):
             contexts.append({"id": research["id"], "type": "research", "title": research["name"],

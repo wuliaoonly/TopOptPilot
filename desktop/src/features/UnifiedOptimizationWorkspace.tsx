@@ -36,6 +36,7 @@ export default function UnifiedOptimizationWorkspace(props: Props) {
   const [messages, setMessages] = useState<WorkspaceConversationMessage[]>([]);
   const [message, setMessage] = useState("");
   const [switcherOpen, setSwitcherOpen] = useState(false);
+  const [quickRunMessage, setQuickRunMessage] = useState("");
 
   const activeContext = useMemo(() => {
     if (mode === "research" && selectedExperiment) return { type: "experiment", id: selectedExperiment.id };
@@ -108,7 +109,26 @@ export default function UnifiedOptimizationWorkspace(props: Props) {
       setWorkflow(await api.workspaceWorkflow(workspace.id));
     } catch (reason) { onError(String(reason)); }
   }
+  async function startQuickRun() {
+    if (!workspace) { onError("请先打开并授权一个 Workspace"); return; }
+    try {
+      const run = await api.engineeringRun({
+        workspaceId: workspace.id, lane: "local-matlab", ownerId: "quick-workbench",
+        task: { task_id: "unified-workspace", dimension: "2d", load_case: "cantilever",
+          geometry: { nelx: 60, nely: 20, nelz: 1 },
+          params: { volfrac: 0.4, penal: 3, rmin: 1.5, max_iter: 60, min_iter: 1, accuracy: "standard", filter_strategy: "fixed" } },
+      });
+      setQuickRunMessage("Quick Run 已提交：" + run.runId);
+      setContexts(await api.workspaceContexts(workspace.id, "quick"));
+    } catch (reason) { onError(String(reason)); }
+  }
   const selectContext = (context: WorkspaceContextRef) => {
+    if (context.type === "quick_run" && context.runId) {
+      void api.engineeringRunGet(context.runId).then(run => {
+        setQuickRunMessage("Quick Run " + run.runId + "：执行状态 " + run.status + "（不等同于可行性）");
+        setTab("result");
+      }).catch(reason => onError(String(reason)));
+    }
     if (context.type === "research" && context.researchId) void onSelectResearch(context.researchId);
     if (context.type === "experiment" && context.researchId && context.experimentId) {
       const research = researches.find(item => item.id === context.researchId);
@@ -137,7 +157,7 @@ export default function UnifiedOptimizationWorkspace(props: Props) {
     </div>
     <div className="unified-context-summary">上下文：{activeContext.type} · {activeContext.id || "未选择"} {mode === "research" && selectedExperiment ? " · SourceSnapshot → Experiment Overlay" : ""}</div>
     {tab === "code" ? <section className="unified-code"><header>{selectedFile?.relative_path || "选择项目文件"} <small>{languageFor(selectedFile?.relative_path)}</small></header><pre>{selectedFile?.content || "代码仅在用户打开的 Workspace 内显示。Deep Experiment 会在此处叠加只读 Overlay；项目主文件不会被 Agent 自动修改。"}</pre></section> : null}
-    {tab === "result" ? <section className="unified-empty"><b>{lane === "quick" ? "Quick Run 执行结果" : "Deep Experiment 确定性评价"}</b><p>{lane === "quick" ? "completed 仅表示执行完成；可行性和优化成功由独立评价轴显示。" : (selectedExperiment?.result ? JSON.stringify(selectedExperiment.result, null, 2) : "选择一个 Experiment 查看真实结果。")}</p></section> : null}
+    {tab === "result" ? <section className="unified-empty"><b>{lane === "quick" ? "Quick Run 执行结果" : "Deep Experiment 确定性评价"}</b>{lane === "quick" ? <><button className="project-open-button" onClick={() => void startQuickRun()}>提交标准 2D Quick Run</button><p>{quickRunMessage || "completed 仅表示执行完成；可行性和优化成功由独立评价轴显示。"}</p></> : <p>{selectedExperiment?.result ? JSON.stringify(selectedExperiment.result, null, 2) : "选择一个 Experiment 查看真实结果。"}</p>}</section> : null}
     {tab === "iteration" ? <section className="unified-empty"><b>迭代可视化</b><p>选择 Run 或 Experiment 后加载该上下文的真实迭代证据；不以占位数据替代求解结果。</p></section> : null}
     {tab === "parameters" ? <section className="unified-empty"><b>参数与对比</b><p>{lane === "quick" ? "仅比较真实 Quick Runs。" : "可比较同一 Research 的 Experiment，并可引用带来源的 Quick 晋升基线。"}</p></section> : null}
   </div>;
