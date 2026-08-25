@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { solverLaneLabel, workspaceLabel } from "./workspace";
 
-describe("TopOptPilot V6.2.2 workspace contract", () => {
+describe("TopOptPilot V6.3 workspace contract", () => {
   it("keeps the two user-facing workspaces explicit", () => {
     expect(workspaceLabel("engineering")).toBe("快速实现");
     expect(workspaceLabel("research")).toBe("深度优化");

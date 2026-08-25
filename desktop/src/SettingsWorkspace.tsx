@@ -321,7 +321,7 @@ export default function SettingsWorkspace({
                 </label>
               ))}
             </div>
-            <p>TopOptPilot Desktop sidecar · V6.2.2 · localhost token protected</p>
+            <p>TopOptPilot Desktop sidecar · V6.3 · localhost token protected</p>
           </section>
         )}
         {tab === "agent" && (

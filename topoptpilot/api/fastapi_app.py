@@ -27,7 +27,7 @@ async def lifespan(_: FastAPI):
     service.close()
 
 
-app = FastAPI(title="TopOptPilot Desktop API", version="6.2.2", lifespan=lifespan,
+app = FastAPI(title="TopOptPilot Desktop API", version="6.3.0", lifespan=lifespan,
               description="Local authenticated interface used by the Tauri desktop workspace.")
 app.add_middleware(
     CORSMiddleware,

@@ -1,6 +1,6 @@
 {
-  "timestamp": "2026-08-25T15:31:34+0800",
-  "version": "6.2.2",
+  "timestamp": "2026-08-25T20:05:52+0800",
+  "version": "6.3.0",
   "gates": {
     "artifacts": {
       "pass": true,
@@ -15,7 +15,7 @@
       "runtime_in_standard_package": false,
       "missing_resources": [],
       "executable": "E:\\AAAwuliao2\\TopOptPilot-v6.2.2-integration\\desktop\\src-tauri\\target\\release\\topoptpilot-desktop.exe",
-      "installer": "E:\\AAAwuliao2\\TopOptPilot-v6.2.2-integration\\desktop\\src-tauri\\target\\release\\bundle\\nsis\\TopOptPilot_6.2.2_x64-setup.exe"
+      "installer": "E:\\AAAwuliao2\\TopOptPilot-v6.2.2-integration\\desktop\\src-tauri\\target\\release\\bundle\\nsis\\TopOptPilot_6.3.0_x64-setup.exe"
     },
     "direct_solver_schema": {
       "pass": true

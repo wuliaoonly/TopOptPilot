@@ -116,7 +116,7 @@ export default function V2App() {
   if (settingsOpen && settings) return <SettingsWorkspace settings={settings} onClose={() => setSettingsOpen(false)} onSaved={value => { setSettings(value); document.documentElement.lang = value.locale; document.documentElement.dataset.density = value.ui_density; }}/>
   return <div className="v2-shell">
     <header className="v2-titlebar" data-tauri-drag-region>
-      <div className="v2-brand"><span className="v2-brand-mark"><Boxes size={18}/></span><div><b>TopOptPilot</b><small>V6.2.2 · TOPOLOGY WORKBENCH</small></div></div>
+      <div className="v2-brand"><span className="v2-brand-mark"><Boxes size={18}/></span><div><b>TopOptPilot</b><small>V6.3 · TOPOLOGY WORKBENCH</small></div></div>
       <nav className="v2-workspaces" aria-label="工作区">{(["engineering", "research"] as WorkspaceMode[]).map(item => <button key={item} className={mode === item ? "active" : ""} onClick={() => setMode(item)}><span className="workspace-dot" data-mode={item}/>{workspaceLabel(item)}</button>)}</nav>
       <div className="v2-actions"><span className="connection"><i/>SIDECAR {health?.version || ""}</span><button title="设置" aria-label="打开设置" onClick={() => setSettingsOpen(true)}><Settings2 size={16}/></button></div>
     </header>

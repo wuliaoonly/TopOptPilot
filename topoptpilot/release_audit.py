@@ -16,7 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def run_audit(include_online: bool = True) -> dict:
-    report = {"timestamp": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "version": "6.2.2", "gates": {}}
+    report = {"timestamp": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "version": "6.3.0", "gates": {}}
     report["gates"]["artifacts"] = _artifact_gate()
     report["gates"]["desktop_app"] = _desktop_gate()
     report["gates"].update(_source_gates())
@@ -112,8 +112,8 @@ def _desktop_gate() -> dict:
     release_dir = ROOT / "desktop/src-tauri/target/release"
     executable = release_dir / "topoptpilot-desktop.exe"
     installer_dir = release_dir / "bundle/nsis"
-    candidates = tuple(installer_dir.glob("TopOptPilot*6.2.2*x64-setup.exe"))
-    installer = candidates[0] if candidates else installer_dir / "TopOptPilot_6.2.2_x64-setup.exe"
+    candidates = tuple(installer_dir.glob("TopOptPilot*6.3.0*x64-setup.exe"))
+    installer = candidates[0] if candidates else installer_dir / "TopOptPilot_6.3.0_x64-setup.exe"
     resources = release_dir / "resources"
     required_resources = (
         "bin/topoptpilot-backend.exe",

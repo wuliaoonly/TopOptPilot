@@ -12,12 +12,12 @@ def test_artifact_gate_uses_generated_canonical_tool_contract() -> None:
     assert Path(result["generated"]).as_posix().endswith(".pi/generated/topopt-tools.ts")
 
 
-def test_runtime_and_reports_use_v622_branding() -> None:
+def test_runtime_and_reports_use_v630_branding() -> None:
     service = (release_audit.ROOT / "topoptpilot/service/research_service.py").read_text(encoding="utf-8")
     reports = (release_audit.ROOT / "topoptpilot/reports/generator.py").read_text(encoding="utf-8")
-    assert '"version": "6.2.2"' in service
-    assert "TopOptPilot V6.2.2" in reports
-    assert "6.2.1" not in service + reports
+    assert '"version": "6.3.0"' in service
+    assert "TopOptPilot V6.3" in reports
+    assert "6.2.2" not in service + reports
 
 
 def test_source_gates_cover_direct_solver_and_shared_stream_tickets() -> None:
@@ -30,12 +30,12 @@ def test_source_gates_cover_direct_solver_and_shared_stream_tickets() -> None:
     assert gates["engineering_solver_manifest"]["files"] > 0
 
 
-def test_desktop_gate_reports_v622_standard_package(monkeypatch, tmp_path: Path) -> None:
+def test_desktop_gate_reports_v630_standard_package(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(release_audit, "ROOT", tmp_path)
     release = tmp_path / "desktop/src-tauri/target/release"
     (release / "topoptpilot-desktop.exe").parent.mkdir(parents=True)
     (release / "topoptpilot-desktop.exe").write_bytes(b"exe")
-    installer = release / "bundle/nsis/TopOptPilot_6.2.2_x64-setup.exe"
+    installer = release / "bundle/nsis/TopOptPilot_6.3.0_x64-setup.exe"
     installer.parent.mkdir(parents=True)
     installer.write_bytes(b"installer")
     resources = release / "resources"

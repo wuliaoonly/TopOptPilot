@@ -337,7 +337,7 @@ class ResearchService:
                 "database": str(self.store.db_path), "cache_dir": str(self.cache_dir),
                 "cache_bytes": directory_size(self.cache_dir),
                 "log_dir": str(self.data_dir / "logs"), "free_disk_bytes": disk.free,
-            "sidecar_port": os.getenv("TOPPILOT_SIDECAR_PORT"), "version": "6.2.2"}
+            "sidecar_port": os.getenv("TOPPILOT_SIDECAR_PORT"), "version": "6.3.0"}
 
     def export_diagnostics(self) -> Path:
         output = self.data_dir / "diagnostics" / f"topoptpilot-diagnostics-{uuid.uuid4().hex[:8]}.zip"
@@ -390,9 +390,9 @@ class ResearchService:
             "matlab": {"status": matlab_state, "version": matlab_mcp.get("matlab_version"),
                        "root": matlab_mcp.get("matlab_root")},
             "sidecar": {"status": "VERIFIED", "port": os.getenv("TOPPILOT_SIDECAR_PORT"),
-                "version": "6.2.2"},
+                "version": "6.3.0"},
         }
-        return {"status": "ok", "version": "6.2.2", "components": components,
+        return {"status": "ok", "version": "6.3.0", "components": components,
                 "solver_2d": matlab_state in {"READY", "VERIFIED"}, "solver_3d": matlab_state in {"READY", "VERIFIED"},
                 "matlab": matlab_mcp["state"] != "UNAVAILABLE", "matlab_mcp": matlab_mcp,
                 "database": str(self.store.db_path),

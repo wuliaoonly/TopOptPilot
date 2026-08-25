@@ -55,14 +55,13 @@ python launch.py
 $env:DASHSCOPE_API_KEY = "<your-key>"
 ```
 
-`python launch.py` 启动 Tauri 原生窗口，不打开浏览器。仅开发旧界面时使用
-`python launch.py --web`。生成 Windows x64 安装包：
+`python launch.py` 只启动 Tauri 原生窗口，不提供浏览器版入口。生成 Windows x64 安装包：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts/build_desktop.ps1
 ```
 
-正式打包成功后，NSIS 输出位于 `desktop/src-tauri/target/release/bundle/nsis/`，产品版本为 iDeskTop v2 2.0.0。
+正式打包成功后，NSIS 输出位于 `desktop/src-tauri/target/release/bundle/nsis/`，产品版本为 TopOptPilot V6.3。
 当前评审分支未完成干净 Windows 安装、签名和 MATLAB/Runtime 最终矩阵，不将开发机产物描述为正式 Release。
 
 ### iDeskTop v2 融合能力
@@ -172,10 +171,8 @@ TopOptPilot/
 ├── scripts/build_desktop.ps1     # 桌面安装包一键打包脚本
 ├── 求解器模块/                    # 原始 MATLAB 求解器源码（F3 权威产品资源）
 ├── vendor/                       # 第三方二进制（不入库，见"开发指南"获取方式）
-├── app.py                        # Streamlit 稳定入口
 ├── launch.py                     # 环境检查 + Workspace 启动器
 ├── topoptpilot/                  # V5 Workspace / Pi RPC / Policy / Memory / Solver
-├── frontend/cockpit.py           # 旧 CLI（兼容保留）
 ├── demo/                         # 演示案例
 │   ├── run_solver_demo.py        # 赛题B演示：真实引擎逐步提升实验成效
 │   ├── demo_runner.py            # 10分钟演示编排
@@ -297,7 +294,6 @@ Round 1 审计驱动调参：盲锐化对照 C≈113.5（退化）→ 灰度反�
 | Reports | 阶段报告 + 最终报告 | ✅ V6.1 设计完成 | 每轮 Markdown + 终止时 Markdown/PDF |
 | Frontend | Tauri 2 + React 桌面 App | ✅ V6.1 | Codex 式三栏工作台 + Settings + Knowledge Center |
 | Sidecar API | FastAPI + WebSocket + Settings/Knowledge API | ✅ V6.1 | 随机端口、一次性令牌、凭据管理 |
-| Legacy UI | Streamlit Workspace | 开发专用 | `python launch.py --web` |
 | Demo | 10分钟演示编排 | ✅ 完成 | 9阶段时间线+Paper-to-Plugin流水线 |
 
 ---
@@ -305,7 +301,7 @@ Round 1 审计驱动调参：盲锐化对照 C≈113.5（退化）→ 灰度反�
 ## 本地环境配置（克隆到运行）
 
 本节面向新协作者：在一台干净的 Windows 机器上，从克隆仓库到运行、测试、开发的完整步骤。
-Linux/macOS 可运行 Python 核心与 Streamlit/API 部分，但原生桌面打包目前只支持 Windows x64。
+Linux/macOS 可运行 Python 核心与 API 开发辅助；原生桌面产品和打包目前只支持 Windows x64。
 
 ### 0. 环境要求清单
 
@@ -332,14 +328,14 @@ cd TopOptPilot
 python -m venv .venv
 .venv\Scripts\Activate.ps1        # 每次新开终端需重新激活
 pip install -r requirements.txt   # 运行依赖
-pip install -r requirements-dev.txt  # 开发者追加：pytest/httpx/streamlit/pyinstaller
+pip install -r requirements-dev.txt  # 开发者追加：pytest/httpx/pyinstaller
 ```
 
 ### 3. Node 依赖
 
 ```powershell
 npm install                     # 根目录必装：@earendil-works/pi-coding-agent（Pi RPC 运行时）
-npm --prefix desktop install    # 仅桌面端开发需要；只用 Streamlit/API 可跳过
+npm --prefix desktop install    # 桌面端开发依赖
 ```
 
 ### 4. 配置 .env
@@ -376,10 +372,7 @@ Safe Mode（确定性规则策略），`demo/run_solver_demo.py` 等真实求解
 # 方式 A：原生桌面工作台（需第 6 节的 Rust 开发环境，或已构建出 EXE）
 python launch.py
 
-# 方式 B：Streamlit 开发界面（无 Rust 时的推荐入口，浏览器打开）
-python launch.py --web
-
-# 方式 C：赛题测试 API（FastAPI，供前端/脚本对接）
+# 方式 B：赛题测试 API（FastAPI，仅供本机桌面端与测试脚本对接）
 uvicorn topoptpilot.api.fastapi_app:app --host 127.0.0.1 --port 8000
 
 # 冒烟验证（无需 API Key，约 20 秒，真实求解器全流程）
