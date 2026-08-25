@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { AppSettings, BackendInfo, EngineeringRun, Experiment, GeometryPreview, KnowledgeEntry, Locale, MatlabHealth, Research, SettingsDiagnostics, SolverCapabilities, SubagentTask, SystemHealth } from "./types";
-import type { AgentWorkflowItem, EngineeringChatRequest, EngineeringChatResponse, EngineeringComparisonSchemeCreate, ExperimentDraft, ExperimentDraftValidation, QuickAgentTask, Workspace, WorkspaceContextRef, WorkspaceConversationMessage } from "./generated/api-contract";
+import type { AgentWorkflowItem, EngineeringChatRequest, EngineeringChatResponse, EngineeringComparisonSchemeCreate, ExperimentDraft, ExperimentDraftValidation, QuickAgentTask, Workspace, WorkspaceContextRef, WorkspaceConversationMessage, WorkspaceGrant } from "./generated/api-contract";
 
 let backend: BackendInfo | null = null;
 
@@ -69,6 +69,7 @@ async function download(path:string,filename:string):Promise<void>{
 export const api = {
   projectPickFolder: () => invoke<string | null>("project_pick_folder"),
   projectOpen: (root: string) => invoke<import("./types").ProjectOpen>("project_open", { root }),
+  workspaceGrant: (root: string, workspaceId: string) => invoke<WorkspaceGrant>("workspace_grant", { root, workspaceId }),
   projectList: (root: string) => invoke<import("./types").ProjectEntry[]>("project_list", { root }),
   projectRead: (root: string, relativePath: string) => invoke<import("./types").ProjectFile>("project_read", { root, relativePath }),
   projectSave: (root: string, relativePath: string, content: string, expectedSha256?: string) => invoke<import("./types").ProjectFile>("project_save", { root, relativePath, content, expectedSha256 }),

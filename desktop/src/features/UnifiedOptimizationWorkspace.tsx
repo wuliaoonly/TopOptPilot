@@ -86,6 +86,9 @@ export default function UnifiedOptimizationWorkspace(props: Props) {
       const project = await api.projectOpen(root);
       setProjectRoot(project.root); setFiles(await api.projectList(project.root));
       const created = await api.createWorkspace({ projectId: project.projectId, name: project.projectId || "项目工作台" });
+      // The opaque grant is kept only in the desktop process/request path; it
+      // is intentionally never rendered or written to local workspace state.
+      await api.workspaceGrant(project.root, created.id);
       setWorkspace(created); setWorkspaces(items => [created, ...items.filter(item => item.id !== created.id)]);
     } catch (reason) { onError(String(reason)); }
   }

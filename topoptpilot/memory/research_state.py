@@ -203,6 +203,7 @@ class ResearchStateStore:
                 "review_verdict": "TEXT",
                 "human_decision": "TEXT",
                 "requires_approval": "INTEGER NOT NULL DEFAULT 0",
+                "overlay_json": "TEXT NOT NULL DEFAULT '{}'",
             })
             self._ensure_columns(db, "events", {
                 "event_id": "TEXT",
@@ -468,8 +469,8 @@ class ResearchStateStore:
                  warm_start,status,safety,created_at,proposal_id,intent,round_number,decision_source,
                  intent_source,policy_version,model,provider,session_id,evidence_ids_json,result_source,
                  knowledge_ids_json,subagent_task_ids_json,solver_variant,acceleration_mode,
-                 review_verdict,human_decision,requires_approval)
-                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                 review_verdict,human_decision,requires_approval,overlay_json)
+                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (data["id"], data["research_id"], ordinal, data["purpose"], data["fidelity"],
                  data["mesh_level"], data["backend"], json.dumps(data["parameters"]),
                  data.get("dimension", 2), json.dumps(data.get("solver_profile", {})),
@@ -485,14 +486,14 @@ class ResearchStateStore:
                  json.dumps(data.get("subagent_task_ids", [])),
                  data.get("solver_variant", "auto"), data.get("acceleration_mode", "auto"),
                  data.get("review_verdict"), data.get("human_decision"),
-                 int(bool(data.get("requires_approval", False)))))
+                 int(bool(data.get("requires_approval", False))), json.dumps(data.get("overlay", {}))))
         return self.get_experiment(data["id"])
 
     def get_experiment(self, experiment_id: str) -> dict | None:
         with self.connection() as db:
             row = db.execute("SELECT * FROM experiments WHERE id=?", (experiment_id,)).fetchone()
         return self._decode(row, ("parameters", "result", "solver_profile", "evidence_ids", "knowledge_ids",
-                                  "subagent_task_ids"))
+                                  "subagent_task_ids", "overlay"))
 
     def list_experiments(self, research_id: str) -> list[dict]:
         with self.connection() as db:
@@ -500,7 +501,7 @@ class ResearchStateStore:
                 "SELECT * FROM experiments WHERE research_id=? ORDER BY ordinal", (research_id,)
             ).fetchall()
         return [self._decode(row, ("parameters", "result", "solver_profile", "evidence_ids", "knowledge_ids",
-                                   "subagent_task_ids")) for row in rows]
+                                   "subagent_task_ids", "overlay")) for row in rows]
 
     def update_experiment(self, experiment_id: str, **fields: Any) -> dict:
         allowed = {"status", "progress", "current_iteration", "run_id", "safety",

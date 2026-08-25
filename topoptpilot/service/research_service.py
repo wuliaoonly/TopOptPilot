@@ -501,6 +501,7 @@ class ResearchService:
             estimated_memory_mb=proposal["estimated_memory_mb"],
             execution_mode=proposal["execution_mode"],
             backend=proposal["backend"], parameters=proposal["parameters"],
+            overlay=proposal.get("overlay", {}),
             warm_start=proposal.get("source_experiment"),
             requires_approval=research["mode"] == "COPILOT",
             proposal_id=proposal_id, intent=proposal["intent"],

@@ -268,6 +268,9 @@ class ExperimentCreate(BaseModel):
         "beta": 1.0,
         "max_iter": 80,
     })
+    # An Overlay belongs to this immutable Experiment record.  It is never
+    # applied to the user project tree by the research service.
+    overlay: dict[str, str] = Field(default_factory=dict)
     warm_start: str | None = None
     requires_approval: bool = False
     proposal_id: str | None = None

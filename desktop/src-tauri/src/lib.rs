@@ -60,6 +60,7 @@ fn backend_info(state: State<'_, BackendState>) -> Option<BackendInfo> {
 
 fn spawn_backend(
     app: &tauri::AppHandle,
+    workspace_grant_secret: &str,
 ) -> Result<(Child, Arc<Mutex<Option<BackendInfo>>>), String> {
     let state = Arc::new(Mutex::new(None));
     let mut command;
@@ -68,7 +69,8 @@ fn spawn_backend(
         command = Command::new("python");
         command
             .args(["-m", "idesktop_v2.api.desktop_sidecar"])
-            .current_dir(root);
+            .current_dir(root)
+            .env("TOPPILOT_WORKSPACE_GRANT_SECRET", workspace_grant_secret);
     } else {
         let resources = app
             .path()
@@ -106,7 +108,8 @@ fn spawn_backend(
                 "TOPPILOT_MATLAB_MCP",
                 resources
                     .join("resources/vendor/matlab-mcp-server/matlab-mcp-server-windows-x64.exe"),
-            );
+            )
+            .env("TOPPILOT_WORKSPACE_GRANT_SECRET", workspace_grant_secret);
     }
     command
         .stdin(Stdio::null())
@@ -137,8 +140,12 @@ fn spawn_backend(
 pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
-            let (child, state) = spawn_backend(app.handle())?;
+            let mut bytes = [0_u8; 32];
+            getrandom::getrandom(&mut bytes).map_err(|error| error.to_string())?;
+            let secret = bytes.iter().map(|value| format!("{value:02x}")).collect::<String>();
+            let (child, state) = spawn_backend(app.handle(), &secret)?;
             app.manage(BackendState(state));
+            app.manage(project::WorkspaceGrantState::new(secret));
             app.manage(project::PatchApprovalState::default());
             app.manage(ChildGuard(Mutex::new(Some(child))));
             Ok(())
@@ -147,6 +154,7 @@ pub fn run() {
             backend_info,
             project::project_pick_folder,
             project::project_open,
+            project::workspace_grant,
             project::project_list,
             project::project_read,
             project::project_save,
