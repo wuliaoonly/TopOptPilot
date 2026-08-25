@@ -142,8 +142,11 @@ def _desktop_gate() -> dict:
 
 def _matlab_gates() -> dict[str, dict]:
     gates: dict[str, dict] = {}
+    packaged_root = ROOT / "desktop/src-tauri/target/release/resources"
+    audit_root = (ROOT if (ROOT / "vendor/matlab-mcp-server/matlab-mcp-server-windows-x64.exe").is_file()
+                  else packaged_root)
     with tempfile.TemporaryDirectory(prefix="topoptpilot_direct_gate_") as directory:
-        worker = MatlabMcpWorker(directory, ROOT)
+        worker = MatlabMcpWorker(directory, audit_root)
         try:
             for dimension, grid in ((2, [12, 4]), (3, [4, 2, 2])):
                 grid_key = "grid2d" if dimension == 2 else "grid3d"
