@@ -93,3 +93,56 @@ class PromotionResult(ApiContract):
     research_id: str = Field(alias="researchId")
     snapshot: SourceSnapshot
     research: dict[str, Any]
+
+
+class EngineeringTask(ApiContract):
+    task_id: str = "idesktop-v2-ui"
+    dimension: Literal["2d", "3d"]
+    load_case: Literal["cantilever", "MBB", "simply_supported", "L-bracket"]
+    geometry: dict[str, int]
+    params: dict[str, Any]
+
+
+class EngineeringChatContext(ApiContract):
+    run_id: str | None = Field(default=None, alias="runId")
+    parameters: dict[str, Any] = Field(default_factory=dict)
+    selected_text: str = Field(default="", max_length=20_000, alias="selectedText")
+    file_digest: str | None = Field(default=None, alias="fileDigest")
+    source: str | None = Field(default=None, max_length=120_000)
+
+
+class EngineeringChatRequest(ApiContract):
+    message: str = Field(min_length=1, max_length=4_000)
+    project_id: str | None = Field(default=None, max_length=128, alias="projectId")
+    relative_path: str | None = Field(default=None, max_length=500, alias="relativePath")
+    context: EngineeringChatContext = Field(default_factory=EngineeringChatContext)
+    allow_external_source: bool = Field(default=False, alias="allowExternalSource")
+
+
+class EngineeringChatResponse(ApiContract):
+    reply: str
+    source: Literal["not_configured", "safe_mode", "qwen"]
+    actions: list[dict[str, Any]] = Field(default_factory=list)
+    context_digest: str = Field(alias="contextDigest", pattern=r"^[0-9a-f]{64}$")
+
+
+class EngineeringComparisonSchemeCreate(ApiContract):
+    run_id: str = Field(alias="runId")
+    name: str | None = Field(default=None, max_length=120)
+
+
+class EngineeringComparisonScheme(ApiContract):
+    id: str
+    name: str
+    run_id: str = Field(alias="runId")
+    config_digest: str = Field(alias="configDigest", pattern=r"^[0-9a-fA-F]{64}$")
+    created_at: str = Field(alias="createdAt")
+    config: dict[str, Any]
+    run: dict[str, Any] | None = None
+    integrity: Literal["verified", "failed", "missing"]
+    integrity_failures: list[str] = Field(default_factory=list, alias="integrityFailures")
+
+
+class ResearchArchiveResult(ApiContract):
+    research: dict[str, Any]
+    archived: bool

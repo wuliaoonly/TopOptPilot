@@ -43,6 +43,297 @@ export const API_SCHEMAS = {
     "title": "ApiError",
     "type": "object"
   },
+  "EngineeringChatRequest": {
+    "$defs": {
+      "EngineeringChatContext": {
+        "additionalProperties": false,
+        "properties": {
+          "fileDigest": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Filedigest"
+          },
+          "parameters": {
+            "additionalProperties": true,
+            "title": "Parameters",
+            "type": "object"
+          },
+          "runId": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Runid"
+          },
+          "selectedText": {
+            "default": "",
+            "maxLength": 20000,
+            "title": "Selectedtext",
+            "type": "string"
+          },
+          "source": {
+            "anyOf": [
+              {
+                "maxLength": 120000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Source"
+          }
+        },
+        "title": "EngineeringChatContext",
+        "type": "object"
+      }
+    },
+    "additionalProperties": false,
+    "properties": {
+      "allowExternalSource": {
+        "default": false,
+        "title": "Allowexternalsource",
+        "type": "boolean"
+      },
+      "context": {
+        "$ref": "#/$defs/EngineeringChatContext"
+      },
+      "message": {
+        "maxLength": 4000,
+        "minLength": 1,
+        "title": "Message",
+        "type": "string"
+      },
+      "projectId": {
+        "anyOf": [
+          {
+            "maxLength": 128,
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "title": "Projectid"
+      },
+      "relativePath": {
+        "anyOf": [
+          {
+            "maxLength": 500,
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "title": "Relativepath"
+      }
+    },
+    "required": [
+      "message"
+    ],
+    "title": "EngineeringChatRequest",
+    "type": "object"
+  },
+  "EngineeringChatResponse": {
+    "additionalProperties": false,
+    "properties": {
+      "actions": {
+        "items": {
+          "additionalProperties": true,
+          "type": "object"
+        },
+        "title": "Actions",
+        "type": "array"
+      },
+      "contextDigest": {
+        "pattern": "^[0-9a-f]{64}$",
+        "title": "Contextdigest",
+        "type": "string"
+      },
+      "reply": {
+        "title": "Reply",
+        "type": "string"
+      },
+      "source": {
+        "enum": [
+          "not_configured",
+          "safe_mode",
+          "qwen"
+        ],
+        "title": "Source",
+        "type": "string"
+      }
+    },
+    "required": [
+      "reply",
+      "source",
+      "contextDigest"
+    ],
+    "title": "EngineeringChatResponse",
+    "type": "object"
+  },
+  "EngineeringComparisonScheme": {
+    "additionalProperties": false,
+    "properties": {
+      "config": {
+        "additionalProperties": true,
+        "title": "Config",
+        "type": "object"
+      },
+      "configDigest": {
+        "pattern": "^[0-9a-fA-F]{64}$",
+        "title": "Configdigest",
+        "type": "string"
+      },
+      "createdAt": {
+        "title": "Createdat",
+        "type": "string"
+      },
+      "id": {
+        "title": "Id",
+        "type": "string"
+      },
+      "integrity": {
+        "enum": [
+          "verified",
+          "failed",
+          "missing"
+        ],
+        "title": "Integrity",
+        "type": "string"
+      },
+      "integrityFailures": {
+        "items": {
+          "type": "string"
+        },
+        "title": "Integrityfailures",
+        "type": "array"
+      },
+      "name": {
+        "title": "Name",
+        "type": "string"
+      },
+      "run": {
+        "anyOf": [
+          {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "title": "Run"
+      },
+      "runId": {
+        "title": "Runid",
+        "type": "string"
+      }
+    },
+    "required": [
+      "id",
+      "name",
+      "runId",
+      "configDigest",
+      "createdAt",
+      "config",
+      "integrity"
+    ],
+    "title": "EngineeringComparisonScheme",
+    "type": "object"
+  },
+  "EngineeringComparisonSchemeCreate": {
+    "additionalProperties": false,
+    "properties": {
+      "name": {
+        "anyOf": [
+          {
+            "maxLength": 120,
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "title": "Name"
+      },
+      "runId": {
+        "title": "Runid",
+        "type": "string"
+      }
+    },
+    "required": [
+      "runId"
+    ],
+    "title": "EngineeringComparisonSchemeCreate",
+    "type": "object"
+  },
+  "EngineeringTask": {
+    "additionalProperties": false,
+    "properties": {
+      "dimension": {
+        "enum": [
+          "2d",
+          "3d"
+        ],
+        "title": "Dimension",
+        "type": "string"
+      },
+      "geometry": {
+        "additionalProperties": {
+          "type": "integer"
+        },
+        "title": "Geometry",
+        "type": "object"
+      },
+      "load_case": {
+        "enum": [
+          "cantilever",
+          "MBB",
+          "simply_supported",
+          "L-bracket"
+        ],
+        "title": "Load Case",
+        "type": "string"
+      },
+      "params": {
+        "additionalProperties": true,
+        "title": "Params",
+        "type": "object"
+      },
+      "task_id": {
+        "default": "idesktop-v2-ui",
+        "title": "Task Id",
+        "type": "string"
+      }
+    },
+    "required": [
+      "dimension",
+      "load_case",
+      "geometry",
+      "params"
+    ],
+    "title": "EngineeringTask",
+    "type": "object"
+  },
   "EventEnvelope": {
     "additionalProperties": false,
     "properties": {
@@ -308,6 +599,26 @@ export const API_SCHEMAS = {
     "title": "PromotionResult",
     "type": "object"
   },
+  "ResearchArchiveResult": {
+    "additionalProperties": false,
+    "properties": {
+      "archived": {
+        "title": "Archived",
+        "type": "boolean"
+      },
+      "research": {
+        "additionalProperties": true,
+        "title": "Research",
+        "type": "object"
+      }
+    },
+    "required": [
+      "research",
+      "archived"
+    ],
+    "title": "ResearchArchiveResult",
+    "type": "object"
+  },
   "SourceSnapshot": {
     "$defs": {
       "ArtifactRef": {
@@ -431,3 +742,10 @@ export interface PromotionRequest { name: string; goal: string; budgetTotal: num
 export interface PromotionResult<TResearch = Record<string, unknown>> { researchId: string; snapshot: SourceSnapshot; research: TResearch }
 export type FinalReviewVerdict = "APPROVE" | "REVISE" | "REJECT";
 export type QuickRunStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
+export interface EngineeringTask { task_id: string; dimension: "2d" | "3d"; load_case: "cantilever" | "MBB" | "simply_supported" | "L-bracket"; geometry: Record<string, number>; params: Record<string, unknown> }
+export interface EngineeringChatContext { runId?: string | null; parameters: Record<string, unknown>; selectedText: string; fileDigest?: string | null; source?: string | null }
+export interface EngineeringChatRequest { message: string; projectId?: string | null; relativePath?: string | null; context: EngineeringChatContext; allowExternalSource: boolean }
+export interface EngineeringChatResponse { reply: string; source: "not_configured" | "safe_mode" | "qwen"; actions: Array<Record<string, unknown>>; contextDigest: string }
+export interface EngineeringComparisonSchemeCreate { runId: string; name?: string | null }
+export interface EngineeringComparisonScheme<TRun = Record<string, unknown>> { id: string; name: string; runId: string; configDigest: string; createdAt: string; config: Record<string, unknown>; run: TRun | null; integrity: "verified" | "failed" | "missing"; integrityFailures: string[] }
+export interface ResearchArchiveResult<TResearch = Record<string, unknown>> { research: TResearch; archived: boolean }

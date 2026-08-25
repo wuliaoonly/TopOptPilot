@@ -1,6 +1,9 @@
 export type Locale = "zh-CN" | "en-US";
 export type { ApiError, ArtifactRef, EventEnvelope, FinalReviewVerdict, PromotionRequest,
-  PromotionResult, QuickRunStatus, SourceSnapshot, StreamTicket } from "./generated/api-contract";
+  PromotionResult, QuickRunStatus, SourceSnapshot, StreamTicket, EngineeringTask,
+  EngineeringChatContext, EngineeringChatRequest, EngineeringChatResponse,
+  EngineeringComparisonSchemeCreate, ResearchArchiveResult } from "./generated/api-contract";
+export type EngineeringComparisonScheme = import("./generated/api-contract").EngineeringComparisonScheme<EngineeringRun>;
 export interface ProjectEntry { relative_path: string; kind: string; size_bytes: number }
 export interface ProjectFile { relative_path: string; content: string; sha256: string }
 export interface ProjectOpen { root: string; projectId: string }
