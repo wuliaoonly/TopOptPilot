@@ -60,7 +60,11 @@ if ($LASTEXITCODE -ne 0) { throw "Selected Python cannot import PyInstaller: $Py
 $SidecarSource = Join-Path $ProjectRoot "idesktop_v2\api\desktop_sidecar.py"
 $MatlabSource = Join-Path $ProjectRoot "matlab"
 $McpSource = Join-Path $ProjectRoot "mcp"
-$SolverSource = Join-Path $ProjectRoot "求解器模块"
+# Keep the package path ASCII in this script source. Windows PowerShell 5.1
+# treats a UTF-8 script without a BOM as an ANSI file on some developer PCs.
+$SolverDirectoryName = [string]::Concat([char]0x6C42, [char]0x89E3, [char]0x5668, [char]0x6A21, [char]0x5757)
+# $SolverSource = Join-Path $ProjectRoot "求解器模块"
+$SolverSource = Join-Path $ProjectRoot $SolverDirectoryName
 $PiSource = Join-Path $ProjectRoot ".pi"
 $NodeVendor = Join-Path $ProjectRoot "vendor\node"
 $NodeExecutable = Join-Path $NodeVendor "node.exe"
@@ -193,7 +197,8 @@ try {
         Copy-Item -LiteralPath $PiSource -Destination (Join-Path $StageRoot ".pi") -Recurse
         Copy-Item -LiteralPath $RootNodeModules -Destination (Join-Path $StageRoot "node_modules") -Recurse
         Copy-Item -LiteralPath $McpSource -Destination (Join-Path $StageRoot "mcp") -Recurse
-        Copy-Item -LiteralPath $SolverSource -Destination (Join-Path $StageRoot "求解器模块") -Recurse
+        Copy-Item -LiteralPath $SolverSource -Destination (Join-Path $StageRoot $SolverDirectoryName) -Recurse
+        # Copy-Item -LiteralPath $SolverSource -Destination (Join-Path $StageRoot "求解器模块") -Recurse
         Get-ChildItem -LiteralPath $StageRoot -Recurse -Force -File |
             Where-Object { $_.Extension -in @(".pyc", ".pyo") } |
             ForEach-Object { Remove-Item -LiteralPath $_.FullName -Force }
@@ -205,8 +210,8 @@ try {
             "bin\topoptpilot-backend.exe", "node\node.exe",
             "vendor\matlab-mcp-server\matlab-mcp-server-windows-x64.exe",
             "mcp\matlab_mcp\topopt-tools.json",
-            "求解器模块\2D\TopOpt_integrated\TopOpt_integrated\topopt_main.m",
-            "求解器模块\TopOpt-3D\TopOpt-3D\topopt3d_main.m",
+            ($SolverDirectoryName + "\2D\TopOpt_integrated\TopOpt_integrated\topopt_main.m"),
+            ($SolverDirectoryName + "\TopOpt-3D\TopOpt-3D\topopt3d_main.m"),
             "matlab\engineering\TopOpt_2D\topopt_main.m",
             "matlab\engineering\TopOpt-3D\topopt3d_main.m",
             "matlab\engineering\solver-sources.json"

@@ -129,11 +129,13 @@ class RunCreateRequest(BaseModel):
 class _Run:
     run_id: str
     owner_id: str
-    workspace_id: str | None
     lane: SolverLane
     task: dict[str, Any]
     config_digest: str
     run_dir: Path
+    # Kept after the historical positional constructor fields so persisted-run
+    # compatibility and external runtime tests do not receive a shifted lane.
+    workspace_id: str | None = None
     runtime_profile_id: str | None = None
     status: RunStatus = RunStatus.QUEUED
     metrics: dict[str, float | None] = field(default_factory=dict)
@@ -146,7 +148,7 @@ class _Run:
     lock: threading.RLock = field(default_factory=threading.RLock)
 
     def public(self) -> dict[str, Any]:
-        value = RunArtifact(
+        return RunArtifact(
             runId=self.run_id,
             ownerType=OwnerType.ENGINEERING_RUN,
             ownerId=self.owner_id,
@@ -159,8 +161,6 @@ class _Run:
             provenance=self.provenance,
             error=self.error,
         ).model_dump(by_alias=True, mode="json")
-        value["workspaceId"] = self.workspace_id
-        return value
 
 
 class RunManager:
@@ -249,7 +249,8 @@ class RunManager:
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_text(content, encoding="utf-8")
             task["_generated_entrypoint"] = request.generated_entrypoint
-        record = _Run(run_id, request.owner_id, request.workspace_id, request.lane, task, hashlib.sha256(canonical.encode("utf-8")).hexdigest(), run_dir, runtime_profile_id=request.runtime_profile_id)
+        record = _Run(run_id, request.owner_id, request.lane, task, hashlib.sha256(canonical.encode("utf-8")).hexdigest(), run_dir,
+                      workspace_id=request.workspace_id, runtime_profile_id=request.runtime_profile_id)
         with self._lock:
             self._runs[run_id] = record
         self.persist(record)
