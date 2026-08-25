@@ -151,7 +151,7 @@ if (Test-Path -LiteralPath $BackupResourceRoot) { Remove-Item -LiteralPath $Back
 
 try {
     New-Item -ItemType Directory -Force -Path (Join-Path $StageRoot "bin") | Out-Null
-    New-Item -ItemType File -Force -Path (Join-Path $StageRoot ".keep") | Out-Null
+    Set-Content -LiteralPath (Join-Path $StageRoot ".keep") -Value "Build staging directory. `scripts/build_desktop.ps1` populates packaged sidecars and resources." -NoNewline
     Copy-Item -LiteralPath $BackendExecutable -Destination (Join-Path $StageRoot "bin\topoptpilot-backend.exe")
     Copy-Item -LiteralPath $MatlabSource -Destination (Join-Path $StageRoot "matlab") -Recurse
     $StagedMatlabRoot = Join-Path $StageRoot "matlab"
