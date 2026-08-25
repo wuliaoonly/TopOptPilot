@@ -58,7 +58,7 @@ class ResearchStateStore:
                     current_iteration INTEGER NOT NULL DEFAULT 0,
                     run_id TEXT, safety TEXT NOT NULL DEFAULT 'LOW',
                     result_json TEXT, error TEXT, created_at TEXT NOT NULL,
-                    started_at TEXT, completed_at TEXT,
+                    started_at TEXT, completed_at TEXT, requires_approval INTEGER NOT NULL DEFAULT 0,
                     FOREIGN KEY(research_id) REFERENCES research(id)
                 );
                 CREATE TABLE IF NOT EXISTS events (
@@ -140,6 +140,7 @@ class ResearchStateStore:
                 "locale": "TEXT NOT NULL DEFAULT 'zh-CN'",
                 "defaults_json": "TEXT NOT NULL DEFAULT '{}'",
                 "contract_json": "TEXT NOT NULL DEFAULT '{}'",
+                "archived_at": "TEXT",
             })
             self._ensure_columns(db, "experiments", {
                 "proposal_id": "TEXT",
@@ -162,6 +163,7 @@ class ResearchStateStore:
                 "task_hash": "TEXT",
                 "review_verdict": "TEXT",
                 "human_decision": "TEXT",
+                "requires_approval": "INTEGER NOT NULL DEFAULT 0",
             })
             self._ensure_columns(db, "events", {
                 "event_id": "TEXT",
@@ -201,6 +203,8 @@ class ResearchStateStore:
         for field in json_fields:
             raw = value.pop(f"{field}_json", None)
             value[field] = json.loads(raw or "{}")
+        if "requires_approval" in value:
+            value["requires_approval"] = bool(value["requires_approval"])
         return value
 
     def create_research(self, data: dict[str, Any]) -> dict:
@@ -221,9 +225,10 @@ class ResearchStateStore:
                  json.dumps(data.get("contract", {}))))
         return self.get_research(data["id"])
 
-    def list_research(self) -> list[dict]:
+    def list_research(self, archived: bool = False) -> list[dict]:
         with self.connection() as db:
-            rows = db.execute("SELECT * FROM research ORDER BY updated_at DESC").fetchall()
+            operator = "IS NOT NULL" if archived else "IS NULL"
+            rows = db.execute(f"SELECT * FROM research WHERE archived_at {operator} ORDER BY updated_at DESC").fetchall()
         return [self._decode(row, ("constraints", "locks", "budgets", "geometry", "material",
                                    "loads", "boundary_conditions", "defaults", "contract")) for row in rows]
 
@@ -235,7 +240,7 @@ class ResearchStateStore:
 
     def update_research(self, research_id: str, **fields: Any) -> dict:
         allowed = {"name", "goal", "mode", "status", "budget_total", "budget_used",
-                   "hypothesis", "current_question", "current_round", "termination_reason", "locale"}
+                   "hypothesis", "current_question", "current_round", "termination_reason", "locale", "archived_at"}
         assignments, values = [], []
         for name, value in fields.items():
             if name in allowed:
@@ -279,8 +284,8 @@ class ResearchStateStore:
                  warm_start,status,safety,created_at,proposal_id,intent,round_number,decision_source,
                  intent_source,policy_version,model,provider,session_id,evidence_ids_json,result_source,
                  knowledge_ids_json,subagent_task_ids_json,solver_variant,acceleration_mode,
-                 review_verdict,human_decision)
-                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                 review_verdict,human_decision,requires_approval)
+                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (data["id"], data["research_id"], ordinal, data["purpose"], data["fidelity"],
                  data["mesh_level"], data["backend"], json.dumps(data["parameters"]),
                  data.get("warm_start"), data["status"], data.get("safety", "LOW"), now,
@@ -292,7 +297,8 @@ class ResearchStateStore:
                  json.dumps(data.get("knowledge_ids", [])),
                  json.dumps(data.get("subagent_task_ids", [])),
                  data.get("solver_variant", "auto"), data.get("acceleration_mode", "auto"),
-                 data.get("review_verdict"), data.get("human_decision")))
+                 data.get("review_verdict"), data.get("human_decision"),
+                 int(bool(data.get("requires_approval", False)))))
         return self.get_experiment(data["id"])
 
     def get_experiment(self, experiment_id: str) -> dict | None:
@@ -330,6 +336,16 @@ class ResearchStateStore:
             with self._lock, self.connection() as db:
                 db.execute(f"UPDATE experiments SET {', '.join(assignments)} WHERE id=?", values)
         return self.get_experiment(experiment_id)
+    def claim_experiment_for_run(self, experiment_id: str, claim_id: str) -> bool:
+        """Atomically claim one runnable experiment across store/process instances."""
+        with self._lock, self.connection() as db:
+            cursor = db.execute("""UPDATE experiments
+                SET status='RUNNING', run_id=?, started_at=?, completed_at=NULL,
+                    error=NULL, progress=0
+                WHERE id=? AND status IN ('WAITING','FAILED','CANCELLED')""",
+                (claim_id, utc_now(), experiment_id),
+            )
+            return cursor.rowcount == 1
 
     def append_event(self, research_id: str, kind: str, title: str, body: str,
                      experiment_id: str | None = None, payload: dict | None = None,
@@ -374,9 +390,15 @@ class ResearchStateStore:
 
     def list_decisions(self, research_id: str) -> list[dict]:
         with self.connection() as db:
-            rows = db.execute("SELECT * FROM decisions WHERE research_id=? ORDER BY created_at",
-                              (research_id,)).fetchall()
+            rows = db.execute("""SELECT * FROM decisions WHERE research_id=?
+                ORDER BY created_at, rowid""", (research_id,)).fetchall()
         return [self._decode(row, ("proposal", "evidence_ids")) for row in rows]
+
+    def resolve_decision_if_pending(self, decision_id: str, status: str) -> bool:
+        with self._lock, self.connection() as db:
+            cursor = db.execute("""UPDATE decisions SET status=?, resolved_at=?
+                WHERE id=? AND status='PENDING'""", (status, utc_now(), decision_id))
+            return cursor.rowcount == 1
 
     def resolve_decision(self, decision_id: str, status: str) -> dict:
         with self._lock, self.connection() as db:

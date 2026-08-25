@@ -66,11 +66,29 @@ def _validate_writable_dir(raw: str | None) -> Path | None:
         raise ValueError("Directory must exist and be writable")
     return candidate
 
+def _validate_fidelity_backend(fidelity: str, backend: str) -> str:
+    value = str(backend)
+    if value == "simulate":
+        raise ValueError("backend=simulate is forbidden for formal experiments")
+    code = str(fidelity).strip().split(maxsplit=1)[0]
+    try:
+        expected = FidelityManager.backend_for(code)
+    except (KeyError, ValueError) as exc:
+        raise ValueError("fidelity must start with F0, F1, F2, or F3") from exc
+    if value != expected:
+        raise ValueError(
+            f"{code} requires backend={expected}; received backend={value}"
+        )
+    return code
+
 
 class ResearchService:
     def __init__(self, data_dir: str | Path | None = None, max_workers: int = 2,
-                 agent_client: PiAgentClient | None = None):
-        configured_data = data_dir or os.environ.get("TOPPILOT_DATA_DIR") or "topoptpilot/storage"
+                 agent_client: PiAgentClient | None = None,
+                 enable_agent_runtime: bool = True):
+        configured_data = data_dir or os.environ.get("TOPPILOT_DATA_DIR") or os.environ.get("IDESKTOP_V2_DATA_DIR")
+        if not configured_data:
+            configured_data = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData/Local")) / "iDeskTopV2"
         self.data_dir = Path(configured_data).resolve()
         self.project_root = Path(os.environ.get(
             "TOPPILOT_RESOURCE_ROOT", Path(__file__).resolve().parents[2])).resolve()
@@ -89,14 +107,21 @@ class ResearchService:
         self.tools = ResearchTools(self)
         self.pi_runtime = None
         self.pi_runtime_error = None
-        try:
-            self.pi_runtime = PiBridge(self)
-        except Exception as exc:
-            self.pi_runtime_error = str(exc)
+        if enable_agent_runtime:
+            try:
+                self.pi_runtime = PiBridge(self)
+            except Exception as exc:
+                self.pi_runtime_error = str(exc)
+        else:
+            self.pi_runtime_error = "disabled"
         self._completion_lock = threading.RLock()
         self._matlab_restart = {"running": False, "last_error": None, "updated_at": None}
         self._qwen_validation = {"status": "CONFIGURED" if get_qwen_api_key()
                                  else "NOT_CONFIGURED", "checked_at": None, "error": None}
+        # Keep one stable lock per touched experiment for the service lifetime.
+        # Replacing terminal locks can recreate the race this table prevents.
+        self._experiment_locks_guard = threading.Lock()
+        self._experiment_locks: dict[str, threading.RLock] = {}
 
     def get_settings(self) -> dict[str, Any]:
         persisted = self.store.get_app_settings() or {}
@@ -231,7 +256,6 @@ class ResearchService:
         self._qwen_validation = {"status": "CONFIGURED" if self.agent_client.api_key else "NOT_CONFIGURED",
                                  "checked_at": None, "error": None}
         return {"deleted": deleted, "source": qwen_api_key_source()}
-
     def test_agent_settings(self) -> dict[str, Any]:
         settings = self.get_settings()["agent"]
         key = get_qwen_api_key()
@@ -517,14 +541,39 @@ class ResearchService:
         return None
 
     def _next_research_id(self) -> str:
-        used = {item["id"] for item in self.store.list_research()}
+        used = {item["id"] for item in [*self.store.list_research(), *self.store.list_research(archived=True)]}
         number = 1
         while f"MBB-{number:03d}" in used:
             number += 1
         return f"MBB-{number:03d}"
 
-    def list_research(self) -> list[dict[str, Any]]:
-        return self.store.list_research()
+    def list_research(self, archived: bool = False) -> list[dict[str, Any]]:
+        return self.store.list_research(archived=archived)
+
+    def archive_research(self, research_id: str) -> dict[str, Any]:
+        research = self._require_research(research_id)
+        active_experiments = [
+            item["id"] for item in self.store.list_experiments(research_id)
+            if str(item.get("status", "")).upper() in {"WAITING", "QUEUED", "RUNNING"}
+        ]
+        pending_decisions = [
+            item["id"] for item in self.store.list_decisions(research_id)
+            if str(item.get("status", "")).upper() == "PENDING"
+        ]
+        active_tasks = [
+            item["id"] for item in self.store.list_subagent_tasks(research_id)
+            if str(item.get("status", "")).upper() in {"WAITING", "QUEUED", "RUNNING", "PENDING"}
+        ]
+        blockers = active_experiments + pending_decisions + active_tasks
+        if str(research.get("status", "")).upper() == "RUNNING" or blockers:
+            raise ValueError("Research 仍有运行任务或待审批事项，请先停止并处理后再移入回收站")
+        if self.pi_runtime is not None:
+            self.pi_runtime.release(research_id)
+        return self.store.update_research(research_id, archived_at=utc_now())
+
+    def restore_research(self, research_id: str) -> dict[str, Any]:
+        self._require_research(research_id)
+        return self.store.update_research(research_id, archived_at=None)
 
     def get_research(self, research_id: str) -> dict[str, Any]:
         research = self.store.get_research(research_id)
@@ -563,7 +612,7 @@ class ResearchService:
             seed = {"mesh_level": defaults.get("mesh_level", "coarse"),
                     "parameters": defaults.get("parameters", {})}
             model = ExperimentCreate.model_validate(_deep_merge(seed, request))
-        code = str(model.fidelity).split()[0]
+        code = _validate_fidelity_backend(model.fidelity, model.backend)
         budget = FidelityManager.budget(research, self.store.list_experiments(research_id))
         if code in {"F0", "F1", "F2", "F3"} and budget["remaining"].get(code, 0) <= 0:
             raise ValueError(f"No remaining {code} budget")
@@ -583,6 +632,7 @@ class ResearchService:
             requires_human_approval(research["mode"], str(safety["risk"]), model.fidelity)
         experiment = self.store.create_experiment({
             **draft, "status": ExperimentStatus.WAITING.value, "safety": safety["risk"],
+            "requires_approval": bool(requires_approval),
         })
         body = (f"Purpose: {model.purpose}\n\nFidelity: {model.fidelity}\n\n"
                 f"Parameters: {json.dumps(parameters, ensure_ascii=False)}")
@@ -619,13 +669,58 @@ class ResearchService:
             experiment = self.store.get_experiment(experiment_id)
         return experiment
 
-    def run_experiment(self, experiment_id: str) -> dict[str, Any]:
-        experiment = self.get_experiment(experiment_id)
-        research = self._require_research(experiment["research_id"])
-        if research["status"] in {"PAUSED", "STOPPED"}:
-            raise ValueError(f"Research is {research['status'].lower()}")
-        if experiment["status"] not in {"WAITING", "FAILED", "CANCELLED"}:
-            return experiment
+    def _experiment_lock(self, experiment_id: str) -> threading.RLock:
+        with self._experiment_locks_guard:
+            lock = self._experiment_locks.get(experiment_id)
+            if lock is None:
+                lock = self._experiment_locks[experiment_id] = threading.RLock()
+            return lock
+
+    def _require_approved_run_decision(self, experiment: dict[str, Any],
+                                       research: dict[str, Any]) -> None:
+        decisions = [
+            item for item in self.store.list_decisions(research["id"])
+            if item.get("experiment_id") == experiment["id"]
+            and item.get("intent") == "RUN_EXPERIMENT"
+        ]
+        requires_approval = requires_human_approval(
+            str(research["mode"]),
+            str(experiment.get("safety", "LOW")),
+            str(experiment["fidelity"]),
+        )
+        if not bool(experiment.get("requires_approval")) and not requires_approval and not decisions:
+            return
+        current = decisions[-1] if decisions else None
+        status = str(current["status"]) if current else "MISSING"
+        if status != DecisionStatus.APPROVED.value:
+            raise ValueError(
+                f"Experiment {experiment['id']} requires an explicit APPROVED decision "
+                f"in Research State (current: {status})"
+            )
+
+    def _claim_experiment_for_run(self, experiment_id: str) -> tuple[dict[str, Any], dict[str, Any], bool]:
+        with self._experiment_lock(experiment_id):
+            experiment = self.get_experiment(experiment_id)
+            research = self._require_research(experiment["research_id"])
+            _validate_fidelity_backend(experiment["fidelity"], experiment["backend"])
+            self._require_approved_run_decision(experiment, research)
+            if research["status"] in {"PAUSED", "STOPPED"}:
+                raise ValueError(f"Research is {research['status'].lower()}")
+            if experiment["status"] not in {"WAITING", "FAILED", "CANCELLED"}:
+                return experiment, research, False
+            claim_id = f"claim_{uuid.uuid4().hex[:12]}"
+            if not self.store.claim_experiment_for_run(experiment_id, claim_id):
+                current = self.store.get_experiment(experiment_id)
+                if current is None:
+                    raise KeyError(f"Experiment {experiment_id} does not exist")
+                return current, research, False
+            claimed = self.store.get_experiment(experiment_id)
+            if claimed is None:
+                raise KeyError(f"Experiment {experiment_id} does not exist")
+            return claimed, research, True
+
+    def _prepare_claimed_experiment(self, experiment: dict[str, Any],
+                                    research: dict[str, Any]) -> tuple[dict, dict, Any]:
         task = build_solver_task(experiment, research)
         if experiment.get("warm_start"):
             source = self.store.get_experiment(experiment["warm_start"])
@@ -648,34 +743,69 @@ class ResearchService:
             backend = str((cached.get("solver") or {}).get("backend", ""))
             if not backend.startswith("matlab_mcp_"):
                 cached = None
+        return task, cache_task, cached
+
+    def _fail_unsubmitted_claim(self, experiment_id: str, exc: Exception) -> None:
+        with self._experiment_lock(experiment_id):
+            current = self.store.get_experiment(experiment_id)
+            if current and current["status"] == "RUNNING" and str(current.get("run_id", "")).startswith("claim_"):
+                self.store.update_experiment(
+                    experiment_id, status="FAILED", progress=1.0,
+                    completed_at=utc_now(), error=str(exc),
+                )
+
+    def run_experiment(self, experiment_id: str) -> dict[str, Any]:
+        experiment, research, claimed = self._claim_experiment_for_run(experiment_id)
+        if not claimed:
+            return experiment
+        try:
+            task, cache_task, cached = self._prepare_claimed_experiment(experiment, research)
+        except Exception as exc:
+            self._fail_unsubmitted_claim(experiment_id, exc)
+            raise
         if cached is not None:
             from concurrent.futures import Future
             future = Future()
             future.set_result(cached)
-            self.store.update_experiment(experiment_id, status="RUNNING", run_id="cache_hit",
-                                         started_at=utc_now(), progress=1.0, cached=1,
-                                         result_source="CACHED_REAL_RESULT")
+            try:
+                self.store.update_experiment(experiment_id, run_id="cache_hit", progress=1.0, cached=1,
+                                             result_source="CACHED_REAL_RESULT")
+            except Exception as exc:
+                self._fail_unsubmitted_claim(experiment_id, exc)
+                raise
             self._complete_experiment(experiment_id, "cache_hit", future, cache_task)
             return self.get_experiment(experiment_id)
-        if experiment["backend"] == "matlab":
-            run_id, _ = self.matlab_worker.submit(
-                task, research["id"], experiment_id,
-                done=lambda rid, future: self._complete_experiment(
-                    experiment_id, rid, future, cache_task),
-            )
-            self.store.append_event(research["id"], EventKind.EXPERIMENT.value,
-                                    "MATLAB MCP STARTED",
-                                    "Approved task was dispatched to the restricted topopt_run_task MCP tool.",
-                                    experiment_id, {"backend": "matlab_mcp", "tool": "topopt_run_task"})
-        else:
-            run_id = self.queue.submit(
-                task, backend=experiment["backend"],
-                done=lambda rid, future: self._complete_experiment(
-                    experiment_id, rid, future, cache_task),
-            )
-        self.store.update_experiment(experiment_id, status="RUNNING", run_id=run_id,
-                                     started_at=utc_now(), progress=0.0,
-                                     result_source="LIVE_REAL_RUN")
+        try:
+            if experiment["backend"] == "matlab":
+                run_id, _ = self.matlab_worker.submit(
+                    task, research["id"], experiment_id,
+                    done=lambda rid, future: self._complete_experiment(
+                        experiment_id, rid, future, cache_task),
+                )
+                self.store.append_event(research["id"], EventKind.EXPERIMENT.value,
+                                        "MATLAB MCP STARTED",
+                                        "Approved task was dispatched to the restricted topopt_run_task MCP tool.",
+                                        experiment_id, {"backend": "matlab_mcp", "tool": "topopt_run_task"})
+            else:
+                run_id = self.queue.submit(
+                    task, backend=experiment["backend"],
+                    done=lambda rid, future: self._complete_experiment(
+                        experiment_id, rid, future, cache_task),
+                )
+        except Exception as exc:
+            self._fail_unsubmitted_claim(experiment_id, exc)
+            raise
+        try:
+            persisted = self.store.update_experiment(experiment_id, run_id=run_id,
+                                                     result_source="LIVE_REAL_RUN")
+            if not persisted or persisted.get("run_id") != run_id:
+                raise RuntimeError("run_id update did not persist")
+        except Exception as exc:
+            claim_id = experiment.get("run_id")
+            raise RuntimeError(
+                f"Solver was submitted as {run_id}, but run_id persistence failed; "
+                f"durable claim remains {claim_id}"
+            ) from exc
         self.store.update_research(research["id"], status="RUNNING",
                                    budget_used=research["budget_used"] + 1)
         self.store.append_event(research["id"], EventKind.EXPERIMENT.value,
@@ -898,16 +1028,22 @@ class ResearchService:
 
     def approve_decision(self, decision_id: str) -> dict[str, Any]:
         decision = self._require_decision(decision_id)
-        if decision["status"] != "PENDING":
-            return decision
-        self.store.resolve_decision(decision_id, "APPROVED")
-        if decision.get("experiment_id"):
-            self.store.update_experiment(decision["experiment_id"], human_decision="APPROVED")
-        self.store.append_event(decision["research_id"], EventKind.HUMAN.value,
-                                "HUMAN APPROVAL", f"Approved {decision['intent']}.",
-                                decision.get("experiment_id"), {"decision_id": decision_id})
-        if decision["experiment_id"]:
-            self.run_experiment(decision["experiment_id"])
+        experiment_id = decision.get("experiment_id")
+        lock = self._experiment_lock(experiment_id) if experiment_id else self._completion_lock
+        with lock:
+            decision = self._require_decision(decision_id)
+            if decision["status"] != "PENDING":
+                return decision
+            if not self.store.resolve_decision_if_pending(decision_id, "APPROVED"):
+                return self._require_decision(decision_id)
+            decision = self._require_decision(decision_id)
+            if experiment_id:
+                self.store.update_experiment(experiment_id, human_decision="APPROVED")
+            self.store.append_event(decision["research_id"], EventKind.HUMAN.value,
+                                    "HUMAN APPROVAL", f"Approved {decision['intent']}.",
+                                    experiment_id, {"decision_id": decision_id})
+        if experiment_id:
+            self.run_experiment(experiment_id)
         return self._require_decision(decision_id)
 
     def edit_pending_experiment(self, experiment_id: str, parameters: dict[str, Any]) -> dict[str, Any]:
@@ -934,13 +1070,23 @@ class ResearchService:
 
     def reject_decision(self, decision_id: str) -> dict[str, Any]:
         decision = self._require_decision(decision_id)
-        self.store.resolve_decision(decision_id, "REJECTED")
-        if decision["experiment_id"]:
-            self.store.update_experiment(decision["experiment_id"], status="CANCELLED")
-            self.store.update_experiment(decision["experiment_id"], human_decision="REJECTED")
-        self.store.append_event(decision["research_id"], EventKind.HUMAN.value,
-                                "HUMAN REJECTION", f"Rejected {decision['intent']}.",
-                                decision.get("experiment_id"), {"decision_id": decision_id})
+        experiment_id = decision.get("experiment_id")
+        lock = self._experiment_lock(experiment_id) if experiment_id else self._completion_lock
+        with lock:
+            decision = self._require_decision(decision_id)
+            if decision["status"] != "PENDING":
+                return decision
+            if not self.store.resolve_decision_if_pending(decision_id, "REJECTED"):
+                return self._require_decision(decision_id)
+            decision = self._require_decision(decision_id)
+            experiment = self.store.get_experiment(experiment_id) if experiment_id else None
+            if experiment and experiment["status"] == "WAITING":
+                self.store.update_experiment(experiment_id, status="CANCELLED")
+            if experiment:
+                self.store.update_experiment(experiment_id, human_decision="REJECTED")
+            self.store.append_event(decision["research_id"], EventKind.HUMAN.value,
+                                    "HUMAN REJECTION", f"Rejected {decision['intent']}.",
+                                    experiment_id, {"decision_id": decision_id})
         return self._require_decision(decision_id)
 
     def execute_command(self, research_id: str, text: str,

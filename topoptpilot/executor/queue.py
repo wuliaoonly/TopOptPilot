@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import threading
+import time
 import uuid
 from concurrent.futures import Future, ProcessPoolExecutor
 from pathlib import Path
@@ -18,24 +19,36 @@ from typing import Any, Callable
 def _atomic_json(path: Path, value: dict[str, Any]) -> None:
     temp = path.with_suffix(f".{os.getpid()}.tmp")
     temp.write_text(json.dumps(value, default=_json_default), encoding="utf-8")
-    os.replace(temp, path)
+    for attempt in range(20):
+        try:
+            os.replace(temp, path)
+            return
+        except PermissionError:
+            if attempt == 19:
+                raise
+            time.sleep(0.01)
+
+
+def _validate_queue_backend(backend: str) -> None:
+    if backend == "simulate":
+        raise ValueError("backend=simulate is forbidden for the formal experiment queue")
+    if backend not in {"python", "python3d"}:
+        raise ValueError(
+            f"backend={backend} is not allowed in the formal experiment queue"
+        )
 
 
 def _run_solver(task: dict[str, Any], backend: str, progress_path: str) -> dict[str, Any]:
+    _validate_queue_backend(backend)
     target = Path(progress_path)
 
     def progress(iteration: int, state: dict[str, Any]) -> None:
         payload = {"iteration": iteration, **state}
         _atomic_json(target, payload)
 
-    if backend == "simulate":
-        from experiments.solver_runner import SolverRunner
-        return SolverRunner(backend="simulate").run(task)
     if backend == "python3d":
         from solver.topopt3d import run_topopt3d
         return run_topopt3d(task, progress=progress)
-    if backend == "matlab":
-        raise RuntimeError("MATLAB jobs must use the persistent restricted MatlabMcpWorker")
     from solver.topopt_engine import run_topopt
     return run_topopt(task, backend=backend, progress=progress)
 
@@ -59,6 +72,7 @@ class ExperimentQueue:
 
     def submit(self, task: dict[str, Any], backend: str = "python",
                done: Callable[[str, Future], None] | None = None) -> str:
+        _validate_queue_backend(backend)
         run_id = f"run_{uuid.uuid4().hex[:10]}"
         path = self.progress_dir / f"{run_id}.json"
         _atomic_json(path, {"iteration": 0, "status": "WAITING"})

@@ -53,6 +53,10 @@ class LocaleRequest(BaseModel):
     locale: str
 
 
+class AgentKeyRequest(BaseModel):
+    api_key: str = Field(min_length=1, max_length=2048)
+
+
 class SettingsPatchRequest(BaseModel):
     settings: dict
 
@@ -64,10 +68,6 @@ class CacheClearRequest(BaseModel):
 class GuideRequest(BaseModel):
     text: str = Field(min_length=1, max_length=4000)
     locale: str = "zh-CN"
-
-
-class AgentKeyRequest(BaseModel):
-    api_key: str = Field(min_length=1, max_length=2048)
 
 
 class GeometryPreviewRequest(BaseModel):
@@ -102,8 +102,28 @@ def create_research(request: dict):
 
 
 @app.get("/api/research")
-def list_research():
-    return service.list_research()
+def list_research(archived: bool = False):
+    return service.list_research(archived=archived)
+
+
+@app.delete("/api/research/{research_id}")
+def archive_research(research_id: str, confirm: bool = False):
+    if not confirm:
+        raise HTTPException(status_code=400, detail="归档前必须显式确认")
+    try:
+        return service.archive_research(research_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.post("/api/research/{research_id}/restore")
+def restore_research(research_id: str):
+    try:
+        return service.restore_research(research_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @app.post("/api/research/{research_id}/autonomous")
@@ -395,7 +415,6 @@ def delete_agent_credential():
         return service.delete_agent_key()
     except OSError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
-
 
 @app.post("/api/settings/restart-pi")
 def restart_pi_settings():
