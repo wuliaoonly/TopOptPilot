@@ -1,11 +1,12 @@
-# iDeskTop v2 — TopOptPilot 融合桌面客户端
+# TopOptPilot V6.3 — 桌面端拓扑优化工作台
 
-> **融合分支说明**：本分支在 TopOptPilot V6.1.1 科研内核上接入 iDeskTop 的 Tauri + React 工程工作区、
+> **V6.3 说明**：本分支在 TopOptPilot 科研内核上接入统一 Tauri + React 工程工作区、
 > 受控项目文件 IDE、本机 MATLAB/编译 Runtime 工程链路、统一制品和四区可调布局。
 > Qwen API Key 只从进程环境变量 `DASHSCOPE_API_KEY` 读取，不写入 SQLite、日志、报告或系统凭据存储。
 > 科研 fidelity 映射为 **F0/F1=Python 2D、F2=Python 3D、F3=MATLAB MCP**；只有 F3 强制人工审批，
 > 且 MCP 故障不得回退为 Python 并宣称 F3 成功。工程 MATLAB/Runtime 链路与科研 F3 权限保持隔离。
-> 当前是开发评审分支；正式 NSIS、MATLAB MCP 制品、在线 Qwen 和干净 Windows 矩阵仍需独立发布门禁。
+> 产品只提供 Tauri 原生桌面端，不提供 Streamlit 或独立浏览器版入口。离线发布门禁已通过；
+> 在线 Agent campaign、干净 Windows 安装和签名仍需独立发布门禁。详见 [V6.3 待测试清单](docs/validation/V6.3-待测试清单.md)。
 
 ## 📑 快速导航
 
@@ -15,6 +16,7 @@
 - [目录结构](#目录结构)
 - [求解器模块](#求解器模块solver)
 - [测试](#测试)
+- [V6.3 待测试清单](docs/validation/V6.3-待测试清单.md)
 - [开发指南](#开发指南)
 - [常见问题](#常见问题faq)
 
@@ -41,7 +43,7 @@ TopOptPilot 不是"自然语言调一次拓扑优化"的工具。它是：
 **核心原则**：大模型不代替有限元求解器。Pi 负责科研意图、证据解释与工具编排；
 Safety Policy 负责把意图编译成合法受控实验；Python/MATLAB 负责确定性计算，Evaluator 客观裁决。
 
-## V6.1.0 快速开始
+## V6.3 快速开始
 
 > 已配置好 Python/Node 的老协作者可用下面的最短路径；从零开始的完整步骤见下文
 > **"本地环境配置（克隆到运行）"** 一节。
@@ -62,7 +64,7 @@ powershell -ExecutionPolicy Bypass -File scripts/build_desktop.ps1
 ```
 
 正式打包成功后，NSIS 输出位于 `desktop/src-tauri/target/release/bundle/nsis/`，产品版本为 TopOptPilot V6.3。
-当前评审分支未完成干净 Windows 安装、签名和 MATLAB/Runtime 最终矩阵，不将开发机产物描述为正式 Release。
+当前候选安装包已通过开发机离线门禁；未完成待测试清单前，不将其描述为正式 Release。
 
 ### iDeskTop v2 融合能力
 
