@@ -84,3 +84,6 @@ XH-202619*.pdf
 .playwright-cli/
 output/
 .worktrees/
+
+# E2E packaged runtime test artifacts (auth.json, session logs, research.db)
+.runtime-tests/
