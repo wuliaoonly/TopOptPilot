@@ -18,6 +18,8 @@ def test_source_gates_cover_direct_solver_and_shared_stream_tickets() -> None:
     assert gates["direct_matlab_only"]["pass"] is True
     assert gates["websocket_realtime"]["pass"] is True
     assert gates["tool_whitelist"]["pass"] is True
+    assert gates["engineering_solver_manifest"]["pass"] is True
+    assert gates["engineering_solver_manifest"]["files"] > 0
 
 
 def test_desktop_gate_reports_v622_standard_package(monkeypatch, tmp_path: Path) -> None:
@@ -37,6 +39,9 @@ def test_desktop_gate_reports_v622_standard_package(monkeypatch, tmp_path: Path)
         "求解器模块/2D/TopOpt_integrated/TopOpt_integrated/topopt_main.m",
         "求解器模块/TopOpt-3D/TopOpt-3D/topopt3d_main.m",
         "matlab/engineering/run_topopt_job.m",
+        "matlab/engineering/TopOpt_2D/topopt_main.m",
+        "matlab/engineering/TopOpt-3D/topopt3d_main.m",
+        "matlab/engineering/solver-sources.json",
     ):
         path = resources / relative
         path.parent.mkdir(parents=True, exist_ok=True)

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import tempfile
 import time
@@ -50,7 +51,46 @@ def _source_gates() -> dict[str, dict]:
         "credential_not_in_sqlite": {"pass": "api_key" not in store.lower() and "/api/settings/agent-key" in api},
         "tool_whitelist": {"pass": "TOOL_CONTRACTS" in read(".pi/extensions/topopt-tools.ts")
                            and all(tool in read(".pi/generated/topopt-tools.ts") for tool in ALLOWED_TOOLS)},
+        "engineering_solver_manifest": _engineering_solver_manifest_gate(),
     }
+
+
+def _engineering_solver_manifest_gate() -> dict:
+    root = ROOT / "matlab/engineering"
+    manifest_path = root / "solver-sources.json"
+    if not manifest_path.is_file():
+        return {"pass": False, "missing": [str(manifest_path)], "mismatches": []}
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        return {"pass": False, "error": str(exc), "missing": [], "mismatches": []}
+    missing: list[str] = []
+    mismatches: list[str] = []
+    dimension_dirs = {"2d": "TopOpt_2D", "3d": "TopOpt-3D"}
+    for relative in (manifest.get("entry2d"), manifest.get("entry3d")):
+        if not relative or not (root / relative).is_file():
+            missing.append(str(relative or "<missing entry>"))
+    files = manifest.get("files") if isinstance(manifest.get("files"), list) else []
+    for item in files:
+        directory = dimension_dirs.get(str(item.get("dimension", "")).lower())
+        relative = item.get("file")
+        expected = str(item.get("packagedSha256", "")).lower()
+        if not directory or not relative:
+            mismatches.append(f"invalid manifest row: {item!r}")
+            continue
+        path = root / directory / str(relative)
+        if not path.is_file():
+            missing.append(path.relative_to(root).as_posix())
+            continue
+        # Git may materialize MATLAB text with CRLF on Windows. The manifest hashes
+        # canonical LF bytes so the release gate is stable across checkout policy.
+        canonical_bytes = path.read_bytes().replace(b"\r\n", b"\n")
+        if not expected or hashlib.sha256(canonical_bytes).hexdigest() != expected:
+            mismatches.append(path.relative_to(root).as_posix())
+    return {"pass": bool(files) and not missing and not mismatches,
+            "manifest": str(manifest_path), "files": len(files),
+            "hash_mode": "sha256-canonical-lf",
+            "missing": missing, "mismatches": mismatches}
 
 
 def _artifact_gate() -> dict:
@@ -80,6 +120,9 @@ def _desktop_gate() -> dict:
         "求解器模块/2D/TopOpt_integrated/TopOpt_integrated/topopt_main.m",
         "求解器模块/TopOpt-3D/TopOpt-3D/topopt3d_main.m",
         "matlab/engineering/run_topopt_job.m",
+        "matlab/engineering/TopOpt_2D/topopt_main.m",
+        "matlab/engineering/TopOpt-3D/topopt3d_main.m",
+        "matlab/engineering/solver-sources.json",
     )
     missing = [relative for relative in required_resources if not (resources / relative).is_file()]
     runtime_in_standard = (resources / "runtime").exists()

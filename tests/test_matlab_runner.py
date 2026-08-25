@@ -23,14 +23,33 @@ def test_build_matlab_config_maps_engineering_task_without_demo_flags() -> None:
     config = build_engineering_matlab_config({
         "load_case": "cantilever",
         "geometry": {"nelx": 12, "nely": 8, "nelz": 3},
-        "params": {"volfrac": 0.35, "max_iter": 7, "rmin": 2.0},
+        "params": {"volfrac": 0.35, "penal": 3.2, "max_iter": 7, "min_iter": 4,
+                   "rmin": 2.0, "filter_strategy": "adaptive", "accuracy": "high"},
     })
     assert config["bc_type"] == "cantilever"
     assert config["nelx"] == 12 and config["nely"] == 8 and config["nelz"] == 3
     assert config["max_iterations"] == 7
+    assert config["min_iterations"] == 4
+    assert config["penal"] == 3.2
+    assert config["filter_strategy"] == "adaptive"
+    assert config["accuracy"] == "high"
     assert config["display"] is False
     assert config["live_stress_snapshots"] is True
     assert config["provenance_mode"] == "engineering-local-matlab"
+
+
+def test_build_matlab_config_routes_explicit_2d_and_3d_sources() -> None:
+    two_d = build_engineering_matlab_config({
+        "dimension": "2d", "geometry": {"nelx": 16, "nely": 8, "nelz": 9},
+    })
+    three_d = build_engineering_matlab_config({
+        "dimension": "3d", "geometry": {"nelx": 16, "nely": 8, "nelz": 5},
+    })
+
+    assert two_d["solver_dimension"] == "2d"
+    assert two_d["nelz"] == 1
+    assert three_d["solver_dimension"] == "3d"
+    assert three_d["nelz"] == 5
 
 
 def test_matlab_batch_expression_escapes_windows_paths() -> None:
