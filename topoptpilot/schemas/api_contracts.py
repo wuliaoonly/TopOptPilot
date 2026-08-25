@@ -36,7 +36,7 @@ class EventEnvelope(ApiContract):
     type: str
     source: str
     timestamp: str
-    owner_type: Literal["engineering_run", "research", "experiment"] = Field(alias="ownerType")
+    owner_type: Literal["engineering_run", "research", "experiment", "workspace", "quick_agent_task"] = Field(alias="ownerType")
     owner_id: str = Field(alias="ownerId")
     run_id: str | None = Field(default=None, alias="runId")
     experiment_id: str | None = Field(default=None, alias="experimentId")
@@ -146,3 +146,103 @@ class EngineeringComparisonScheme(ApiContract):
 class ResearchArchiveResult(ApiContract):
     research: dict[str, Any]
     archived: bool
+
+
+# Workspace contracts intentionally expose a project identity and grant status,
+# never a local root path or the signed grant material itself.
+class Workspace(ApiContract):
+    id: str
+    project_id: str = Field(alias="projectId")
+    name: str
+    read_only: bool = Field(default=False, alias="readOnly")
+    created_at: str = Field(alias="createdAt")
+    updated_at: str = Field(alias="updatedAt")
+
+
+class WorkspaceGrant(ApiContract):
+    workspace_id: str = Field(alias="workspaceId")
+    project_id: str = Field(alias="projectId")
+    expires_at: str = Field(alias="expiresAt")
+    allowed_extensions: list[str] = Field(alias="allowedExtensions")
+    grant: str = Field(min_length=16)
+
+
+class WorkspaceContextRef(ApiContract):
+    id: str
+    type: Literal["workspace_draft", "quick_run", "research", "experiment"]
+    title: str
+    status: str
+    workspace_id: str = Field(alias="workspaceId")
+    research_id: str | None = Field(default=None, alias="researchId")
+    run_id: str | None = Field(default=None, alias="runId")
+    experiment_id: str | None = Field(default=None, alias="experimentId")
+    source_summary: str | None = Field(default=None, alias="sourceSummary")
+
+
+class WorkspaceConversationMessage(ApiContract):
+    id: str
+    workspace_id: str = Field(alias="workspaceId")
+    lane: Literal["quick", "deep", "shared"]
+    role: Literal["user", "assistant", "system"]
+    content: str = Field(max_length=16_000)
+    created_at: str = Field(alias="createdAt")
+    research_id: str | None = Field(default=None, alias="researchId")
+
+
+class AgentWorkflowItem(ApiContract):
+    workflow_item_id: str = Field(alias="workflowItemId")
+    workspace_id: str = Field(alias="workspaceId")
+    lane: Literal["quick", "deep"]
+    owner_type: str = Field(alias="ownerType")
+    owner_id: str = Field(alias="ownerId")
+    actor_type: str = Field(alias="actorType")
+    actor_role: str = Field(alias="actorRole")
+    phase: str
+    status: str
+    title: str
+    summary: str
+    created_at: str = Field(alias="createdAt")
+    updated_at: str = Field(alias="updatedAt")
+    related_run_id: str | None = Field(default=None, alias="relatedRunId")
+    experiment_id: str | None = Field(default=None, alias="experimentId")
+    proposal_id: str | None = Field(default=None, alias="proposalId")
+    task_id: str | None = Field(default=None, alias="taskId")
+    evidence_ids: list[str] = Field(default_factory=list, alias="evidenceIds")
+    requires_human_action: bool = Field(default=False, alias="requiresHumanAction")
+    sanitized_tool_call: dict[str, Any] | None = Field(default=None, alias="sanitizedToolCall")
+    error: str | None = None
+
+
+class QuickAgentSession(ApiContract):
+    workspace_id: str = Field(alias="workspaceId")
+    status: Literal["idle", "running", "paused", "stopped", "failed"]
+    updated_at: str = Field(alias="updatedAt")
+
+
+class QuickAgentTask(ApiContract):
+    id: str
+    workspace_id: str = Field(alias="workspaceId")
+    status: Literal["queued", "running", "preflight", "patch_proposed", "awaiting_approval", "applied", "failed", "cancelled"]
+    round: int = Field(ge=1, le=2)
+    prompt: str = Field(max_length=4_000)
+    result: dict[str, Any] = Field(default_factory=dict)
+    created_at: str = Field(alias="createdAt")
+    updated_at: str = Field(alias="updatedAt")
+
+
+class ExperimentDraft(ApiContract):
+    purpose: str = Field(min_length=1, max_length=1000)
+    dimension: Literal[2, 3]
+    backend: Literal["MATLAB_MCP"] = "MATLAB_MCP"
+    solver_profile: Literal["standard", "verify"] = Field(alias="solverProfile")
+    parameters: dict[str, Any] = Field(default_factory=dict)
+    overlay: dict[str, str] = Field(default_factory=dict)
+    static_warnings_confirmed: bool = Field(default=False, alias="staticWarningsConfirmed")
+
+
+class ExperimentDraftValidation(ApiContract):
+    valid: bool
+    blocking_errors: list[str] = Field(default_factory=list, alias="blockingErrors")
+    warnings: list[str] = Field(default_factory=list)
+    estimated_cost: float = Field(default=0, alias="estimatedCost")
+    budget_available: bool = Field(default=False, alias="budgetAvailable")

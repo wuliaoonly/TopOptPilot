@@ -3,6 +3,7 @@ import { Boxes, LoaderCircle, Settings2, ShieldCheck } from "lucide-react";
 import { api, initializeBackend } from "./api";
 import EngineeringWorkspace from "./features/engineering/EngineeringWorkspace";
 import ResearchWorkspace from "./features/research/ResearchWorkspace";
+import UnifiedOptimizationWorkspace from "./features/UnifiedOptimizationWorkspace";
 import SettingsWorkspace from "./SettingsWorkspace";
 import type { AppSettings, EngineeringRun, Experiment, Research } from "./types";
 import type { WorkspaceMode } from "./workspace";
@@ -69,10 +70,10 @@ export default function V2App() {
     setMode("research");
   }, [settings?.new_research.budget_total]);
 
-  async function createResearch() {
+  async function createResearch(workspaceId?: string) {
     try {
       const defaults = settings?.new_research;
-      const created = await api.createResearch({ name: "新拓扑研究", goal: "验证工程基线与科研策略的差异", budget_total: defaults?.budget_total ?? 12, mode: defaults?.mode ?? "COPILOT", constraints: defaults?.constraints ?? {} });
+      const created = await api.createResearch({ name: "新拓扑研究", goal: "验证工程基线与科研策略的差异", budget_total: defaults?.budget_total ?? 12, mode: defaults?.mode ?? "COPILOT", constraints: defaults?.constraints ?? {}, workspaceId });
       setResearches(items => [created, ...items]); setSelectedResearch(created); setSelectedExperiment(null); setMode("research");
     } catch (reason) { reportError(String(reason)); }
   }
@@ -105,10 +106,11 @@ export default function V2App() {
       setResearches(items => [restored, ...items.filter(item => item.id !== restored.id)]);
     } catch (reason) { reportError(String(reason)); }
   }
-  const workspace = useMemo(() => mode === "engineering"
-    ? <EngineeringWorkspace health={health} onError={reportError} onResearchBaseline={createResearchFromRun} researches={researches} selectedResearch={selectedResearch} onCreateResearch={createResearch} onSelectResearch={refreshSelected}/>
-    : <ResearchWorkspace researches={researches} selected={selectedResearch} active={active} command={command} busy={busy} safeMode={safeMode} onCommand={runResearchCommand} onCreateResearch={createResearch} onArchive={archiveResearch} onRestore={restoreResearch} onDecision={decide} onError={reportError} onSelect={refreshSelected} onSelectExperiment={setSelectedExperiment} setCommand={setCommand}/>,
-    [mode, health, reportError, createResearchFromRun, researches, selectedResearch, active, command, busy, safeMode, refreshSelected]);
+  const workspace = useMemo(() => <UnifiedOptimizationWorkspace
+    mode={mode} researches={researches} selectedResearch={selectedResearch}
+    selectedExperiment={selectedExperiment} onSelectResearch={refreshSelected}
+    onSelectExperiment={setSelectedExperiment} onCreateResearch={createResearch} onError={reportError}/>,
+    [mode, researches, selectedResearch, selectedExperiment, refreshSelected, reportError]);
 
   if (!ready) return <div className="v2-boot"><LoaderCircle className="spin" size={28}/><b>正在启动 TopOptPilot</b><span>{error || "连接统一 sidecar…"}</span></div>;
   if (settingsOpen && settings) return <SettingsWorkspace settings={settings} onClose={() => setSettingsOpen(false)} onSaved={value => { setSettings(value); document.documentElement.lang = value.locale; document.documentElement.dataset.density = value.ui_density; }}/>

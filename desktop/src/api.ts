@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { AppSettings, BackendInfo, EngineeringRun, GeometryPreview, KnowledgeEntry, Locale, MatlabHealth, Research, SettingsDiagnostics, SolverCapabilities, SubagentTask, SystemHealth } from "./types";
-import type { EngineeringChatRequest, EngineeringChatResponse, EngineeringComparisonSchemeCreate } from "./generated/api-contract";
+import type { AppSettings, BackendInfo, EngineeringRun, Experiment, GeometryPreview, KnowledgeEntry, Locale, MatlabHealth, Research, SettingsDiagnostics, SolverCapabilities, SubagentTask, SystemHealth } from "./types";
+import type { AgentWorkflowItem, EngineeringChatRequest, EngineeringChatResponse, EngineeringComparisonSchemeCreate, ExperimentDraft, ExperimentDraftValidation, QuickAgentTask, Workspace, WorkspaceContextRef, WorkspaceConversationMessage } from "./generated/api-contract";
 
 let backend: BackendInfo | null = null;
 
@@ -82,7 +82,17 @@ export const api = {
   engineeringGenerate: (instruction: string) => request<{generatedEntrypoint:string;generatedFiles:Record<string,string>}>("/api/engineering/assistant/generate", { method: "POST", body: JSON.stringify({ instruction }) }),
   health: () => request<SystemHealth>("/api/health"),
   listResearch: (archived = false) => request<Research[]>(`/api/research?archived=${archived ? "true" : "false"}`),
-  archiveResearch: (id: string) => request<import("./generated/api-contract").ResearchArchiveResult<Research>>(`/api/research/${encodeURIComponent(id)}?confirm=true`, { method: "DELETE" }),
+ archiveResearch: (id: string) => request<import("./generated/api-contract").ResearchArchiveResult<Research>>(`/api/research/${encodeURIComponent(id)}?confirm=true`, { method: "DELETE" }),
+  listWorkspaces: () => request<Workspace[]>("/api/workspaces"),
+  createWorkspace: (data: {projectId:string; name:string}) => request<Workspace>("/api/workspaces", {method:"POST",body:JSON.stringify(data)}),
+  workspaceContexts: (id:string, mode:"quick"|"deep") => request<WorkspaceContextRef[]>("/api/workspaces/" + encodeURIComponent(id) + "/contexts?mode=" + mode),
+  workspaceConversation: (id:string) => request<WorkspaceConversationMessage[]>("/api/workspaces/" + encodeURIComponent(id) + "/conversation"),
+  workspaceMessage: (id:string, data:{lane:"quick"|"deep"|"shared";role:"user"|"assistant"|"system";content:string;researchId?:string}) => request<WorkspaceConversationMessage>("/api/workspaces/" + encodeURIComponent(id) + "/conversation", {method:"POST",body:JSON.stringify(data)}),
+  workspaceWorkflow: (id:string) => request<AgentWorkflowItem[]>("/api/workspaces/" + encodeURIComponent(id) + "/workflow"),
+  quickAgentTask: (id:string,prompt:string) => request<QuickAgentTask>("/api/workspaces/" + encodeURIComponent(id) + "/quick-agent/tasks", {method:"POST",body:JSON.stringify({prompt})}),
+  cancelQuickAgentTask: (workspaceId:string,taskId:string) => request<QuickAgentTask>("/api/workspaces/" + encodeURIComponent(workspaceId) + "/quick-agent/tasks/" + encodeURIComponent(taskId) + "/cancel", {method:"POST"}),
+  validateExperimentDraft: (id:string,data:ExperimentDraft) => request<ExperimentDraftValidation>("/api/research/" + encodeURIComponent(id) + "/experiment-drafts/validate", {method:"POST",body:JSON.stringify(data)}),
+  createManualExperiment: (id:string,data:ExperimentDraft) => request<Experiment>("/api/research/" + encodeURIComponent(id) + "/experiments/manual", {method:"POST",body:JSON.stringify(data)}),
   restoreResearch: (id: string) => request<import("./generated/api-contract").ResearchArchiveResult<Research>>(`/api/research/${encodeURIComponent(id)}/restore`, { method: "POST" }),
   getResearch: (id: string) => request<Research>(`/api/research/${id}`),
   researchArtifacts: (id: string) => request<{researchId:string; experiments:Array<{experimentId:string; status:string; dimension:number; solverProfile:Record<string,unknown>; legacyFidelity?:string; backend:string; provenance:Record<string,string>; files:Array<{relativePath:string; sha256:string; mediaType:string; sizeBytes:number}>; metrics:Record<string,number|null>}>}>(`/api/research/${id}/artifacts`),
@@ -185,6 +195,7 @@ export const quickApi = {
   deleteComparisonScheme: api.engineeringComparisonSchemeDelete,
   terminalStart: api.terminalStart, terminalCommand: api.terminalCommand,
   terminalPoll: api.terminalPoll, terminalStop: api.terminalStop,
+  quickAgentTask: api.quickAgentTask, cancelQuickAgentTask: api.cancelQuickAgentTask,
 };
 
 export const deepApi = {
@@ -196,4 +207,10 @@ export const deepApi = {
   approve: api.approve, reject: api.reject, editDecision: api.editDecision,
   why: api.why, agentTasks: api.agentTasks, setLocale: api.setLocale,
   stream: api.stream, downloadReport: api.downloadReport,
+  validateDraft: api.validateExperimentDraft, createManualExperiment: api.createManualExperiment,
+};
+
+export const workspaceApi = {
+  list: api.listWorkspaces, create: api.createWorkspace, contexts: api.workspaceContexts,
+  conversation: api.workspaceConversation, message: api.workspaceMessage, workflow: api.workspaceWorkflow,
 };

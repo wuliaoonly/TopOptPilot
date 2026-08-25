@@ -2,7 +2,8 @@
 
 from contextlib import asynccontextmanager
 
-from topoptpilot.api.fastapi_app import app
+from topoptpilot.api.fastapi_app import app, service
+from topoptpilot.api.workspace_router import build_workspace_router
 
 from idesktop_v2 import __version__
 from idesktop_v2.assistant.router import router as engineering_assistant_router
@@ -29,3 +30,4 @@ app.description = "Unified engineering and policy-controlled research desktop AP
 app.include_router(engineering_router)
 app.include_router(engineering_assistant_router)
 app.include_router(research_artifact_router)
+app.include_router(build_workspace_router(service))

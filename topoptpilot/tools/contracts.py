@@ -21,7 +21,7 @@ TOOL_CONTRACTS: dict[str, dict[str, Any]] = {
     "research_get_context": {"description": "Read compact authoritative L3 research context before planning.", "parameters": _object()},
     "research_query_history": {"description": "Retrieve relevant historical experiments and evidence.", "parameters": _object({"query": STRING, "limit": {"type": "number"}}, ["query"])},
     "research_get_budget": {"description": "Read remaining experiment-count and compute-time budgets.", "parameters": _object()},
-    "policy_compile_intent": {"description": "Compile scientific intent into safe controlled experiment proposals.", "parameters": _object({"intent": STRING, "preserve": STRING_ARRAY, "explanations": STRING_ARRAY, "factors": STRING_ARRAY, "factor": STRING, "source_experiment": STRING}, ["intent"])},
+    "experiment_validate_draft": {"description": "Validate an exact Agent draft before it becomes one human-approvable proposal.", "parameters": _object({"purpose": STRING, "dimension": {"type": "number"}, "solverProfile": STRING, "parameters": _object({}, []), "overlay": _object({}, [])}, ["purpose", "dimension", "solverProfile"])},
     "experiment_preview": {"description": "Preview cost, risk, purpose, and approval requirement without running FEM.", "parameters": _object({"proposal_id": STRING}, ["proposal_id"])},
     "experiment_submit": {"description": "Submit an already compiled safe proposal asynchronously.", "parameters": _object({"proposal_id": STRING}, ["proposal_id"])},
     "experiment_status": {"description": "Read asynchronous experiment status and progress.", "parameters": _object({"experiment_id": STRING}, ["experiment_id"])},
@@ -37,4 +37,3 @@ TOOL_CONTRACTS: dict[str, dict[str, Any]] = {
 }
 
 ALLOWED_TOOLS = frozenset(TOOL_CONTRACTS)
-

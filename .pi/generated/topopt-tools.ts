@@ -79,6 +79,41 @@ export const TOOL_CONTRACTS = {
       "type": "object"
     }
   },
+  "experiment_validate_draft": {
+    "description": "Validate an exact Agent draft before it becomes one human-approvable proposal.",
+    "parameters": {
+      "additionalProperties": false,
+      "properties": {
+        "dimension": {
+          "type": "number"
+        },
+        "overlay": {
+          "additionalProperties": false,
+          "properties": {},
+          "required": [],
+          "type": "object"
+        },
+        "parameters": {
+          "additionalProperties": false,
+          "properties": {},
+          "required": [],
+          "type": "object"
+        },
+        "purpose": {
+          "type": "string"
+        },
+        "solverProfile": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "purpose",
+        "dimension",
+        "solverProfile"
+      ],
+      "type": "object"
+    }
+  },
   "failure_get_evidence": {
     "description": "Retrieve experiments supporting a structured failure type.",
     "parameters": {
@@ -126,45 +161,6 @@ export const TOOL_CONTRACTS = {
       },
       "required": [
         "query"
-      ],
-      "type": "object"
-    }
-  },
-  "policy_compile_intent": {
-    "description": "Compile scientific intent into safe controlled experiment proposals.",
-    "parameters": {
-      "additionalProperties": false,
-      "properties": {
-        "explanations": {
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        },
-        "factor": {
-          "type": "string"
-        },
-        "factors": {
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        },
-        "intent": {
-          "type": "string"
-        },
-        "preserve": {
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        },
-        "source_experiment": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "intent"
       ],
       "type": "object"
     }

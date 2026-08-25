@@ -20,7 +20,7 @@ from .subagents import SubagentCoordinator
 
 
 MAIN_TOOLS = (
-    "research_get_context,research_query_history,research_get_budget,policy_compile_intent,"
+    "research_get_context,research_query_history,research_get_budget,experiment_validate_draft,"
     "experiment_preview,experiment_submit,experiment_status,experiment_result,"
     "experiment_compare,research_get_pareto,failure_get_evidence,knowledge_search,knowledge_get,"
     "solver_get_capabilities,subagent_dispatch,subagent_status"
@@ -56,11 +56,12 @@ class PiProcess:
             credential = self.bridge.service.agent_api_key()
             if credential:
                 env["DASHSCOPE_API_KEY"] = credential
+            capability = self.bridge.gateway.issue_capability(self.research_id, self.role, self.tools)
             env.update({
                 "PI_CODING_AGENT_DIR": str(self.bridge.config_dir),
                 "TOPPILOT_TOOL_URL": self.bridge.gateway.url,
                 "TOPPILOT_RESEARCH_ID": self.research_id,
-                "TOPPILOT_TOOL_TOKEN": self.bridge.gateway.token,
+                "TOPPILOT_TOOL_TOKEN": capability,
                 "TOPPILOT_AGENT_ROLE": self.role,
             })
             session_id = self.session_id_override or self.bridge.sessions.session_id(self.research_id)

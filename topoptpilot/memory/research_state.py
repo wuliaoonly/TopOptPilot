@@ -127,6 +127,37 @@ class ResearchStateStore:
                 CREATE INDEX IF NOT EXISTS idx_subagent_research ON subagent_tasks(research_id, created_at);
                 CREATE INDEX IF NOT EXISTS idx_hypothesis_research ON hypotheses(research_id, round_number);
                 CREATE INDEX IF NOT EXISTS idx_artifact_research ON artifact_lineage(research_id, experiment_id);
+                CREATE TABLE IF NOT EXISTS workspaces (
+                    id TEXT PRIMARY KEY, project_id TEXT NOT NULL UNIQUE, name TEXT NOT NULL,
+                    read_only INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS workspace_conversations (
+                    id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, lane TEXT NOT NULL,
+                    role TEXT NOT NULL, content TEXT NOT NULL, research_id TEXT,
+                    created_at TEXT NOT NULL, FOREIGN KEY(workspace_id) REFERENCES workspaces(id)
+                );
+                CREATE TABLE IF NOT EXISTS workflow_items (
+                    id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, lane TEXT NOT NULL,
+                    owner_type TEXT NOT NULL, owner_id TEXT NOT NULL, actor_type TEXT NOT NULL,
+                    actor_role TEXT NOT NULL, phase TEXT NOT NULL, status TEXT NOT NULL,
+                    title TEXT NOT NULL, summary TEXT NOT NULL, related_run_id TEXT,
+                    experiment_id TEXT, proposal_id TEXT, task_id TEXT, evidence_ids_json TEXT NOT NULL DEFAULT '[]',
+                    requires_human_action INTEGER NOT NULL DEFAULT 0, sanitized_tool_call_json TEXT,
+                    error TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                    FOREIGN KEY(workspace_id) REFERENCES workspaces(id)
+                );
+                CREATE TABLE IF NOT EXISTS quick_agent_sessions (
+                    workspace_id TEXT PRIMARY KEY, status TEXT NOT NULL DEFAULT 'idle', updated_at TEXT NOT NULL,
+                    FOREIGN KEY(workspace_id) REFERENCES workspaces(id)
+                );
+                CREATE TABLE IF NOT EXISTS quick_agent_tasks (
+                    id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, status TEXT NOT NULL, round INTEGER NOT NULL,
+                    prompt TEXT NOT NULL, result_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL, FOREIGN KEY(workspace_id) REFERENCES workspaces(id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_workspace_message ON workspace_conversations(workspace_id, created_at);
+                CREATE INDEX IF NOT EXISTS idx_workspace_workflow ON workflow_items(workspace_id, updated_at);
+                CREATE INDEX IF NOT EXISTS idx_quick_task_workspace ON quick_agent_tasks(workspace_id, created_at);
             """)
             self._ensure_columns(db, "research", {
                 "budgets_json": "TEXT NOT NULL DEFAULT '{}'",
@@ -142,6 +173,7 @@ class ResearchStateStore:
                 "defaults_json": "TEXT NOT NULL DEFAULT '{}'",
                 "contract_json": "TEXT NOT NULL DEFAULT '{}'",
                 "archived_at": "TEXT",
+                "workspace_id": "TEXT",
             })
             self._ensure_columns(db, "experiments", {
                 "dimension": "INTEGER NOT NULL DEFAULT 2",
@@ -194,6 +226,8 @@ class ResearchStateStore:
                 "provider": "TEXT",
                 "session_id": "TEXT",
                 "evidence_ids_json": "TEXT NOT NULL DEFAULT '[]'",
+                "proposal_source": "TEXT NOT NULL DEFAULT 'LEGACY_POLICY'",
+                "overlay_json": "TEXT NOT NULL DEFAULT '{}'",
             })
             self._ensure_columns(db, "agent_sessions", {
                 "stream_text": "TEXT NOT NULL DEFAULT ''",
@@ -225,6 +259,132 @@ class ResearchStateStore:
             value["requires_approval"] = bool(value["requires_approval"])
         return value
 
+    # Workspace data is deliberately persisted with the authoritative research
+    # state: it keeps quick and deep UI recovery atomic at the user-data root.
+    # Signed directory grants are never stored here.
+    def create_workspace(self, data: dict[str, Any]) -> dict:
+        now = utc_now()
+        with self._lock, self.connection() as db:
+            db.execute("""INSERT INTO workspaces (id,project_id,name,read_only,created_at,updated_at)
+                VALUES (?,?,?,?,?,?)""", (data["id"], data["project_id"], data["name"],
+                int(bool(data.get("read_only", False))), now, now))
+        return self.get_workspace(data["id"])
+
+    def get_workspace(self, workspace_id: str) -> dict | None:
+        with self.connection() as db:
+            row = db.execute("SELECT * FROM workspaces WHERE id=?", (workspace_id,)).fetchone()
+        value = dict(row) if row else None
+        if value is not None:
+            value["read_only"] = bool(value["read_only"])
+        return value
+
+    def list_workspaces(self) -> list[dict]:
+        with self.connection() as db:
+            rows = db.execute("SELECT * FROM workspaces ORDER BY updated_at DESC").fetchall()
+        return [{**dict(row), "read_only": bool(row["read_only"])} for row in rows]
+
+    def update_workspace(self, workspace_id: str, **fields: Any) -> dict:
+        allowed = {"name", "read_only"}
+        assignments, values = [], []
+        for name, value in fields.items():
+            if name in allowed:
+                assignments.append(f"{name}=?")
+                values.append(int(value) if name == "read_only" else value)
+        if assignments:
+            assignments.append("updated_at=?")
+            values.extend((utc_now(), workspace_id))
+            with self._lock, self.connection() as db:
+                db.execute(f"UPDATE workspaces SET {', '.join(assignments)} WHERE id=?", values)
+        return self.get_workspace(workspace_id)
+
+    def add_workspace_message(self, data: dict[str, Any]) -> dict:
+        with self._lock, self.connection() as db:
+            db.execute("""INSERT INTO workspace_conversations
+                (id,workspace_id,lane,role,content,research_id,created_at) VALUES (?,?,?,?,?,?,?)""",
+                (data["id"], data["workspace_id"], data["lane"], data["role"], data["content"],
+                 data.get("research_id"), utc_now()))
+        return self.list_workspace_messages(data["workspace_id"], limit=1)[-1]
+
+    def list_workspace_messages(self, workspace_id: str, *, limit: int = 200) -> list[dict]:
+        with self.connection() as db:
+            rows = db.execute("""SELECT * FROM workspace_conversations WHERE workspace_id=?
+                ORDER BY created_at DESC LIMIT ?""", (workspace_id, limit)).fetchall()
+        return [dict(row) for row in reversed(rows)]
+
+    def add_workflow_item(self, data: dict[str, Any]) -> dict:
+        now = utc_now()
+        with self._lock, self.connection() as db:
+            db.execute("""INSERT INTO workflow_items
+              (id,workspace_id,lane,owner_type,owner_id,actor_type,actor_role,phase,status,title,summary,
+               related_run_id,experiment_id,proposal_id,task_id,evidence_ids_json,requires_human_action,
+               sanitized_tool_call_json,error,created_at,updated_at)
+              VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+              (data["id"], data["workspace_id"], data["lane"], data["owner_type"], data["owner_id"],
+               data.get("actor_type", "agent"), data.get("actor_role", "SYSTEM"), data["phase"],
+               data["status"], data["title"], data.get("summary", ""), data.get("related_run_id"),
+               data.get("experiment_id"), data.get("proposal_id"), data.get("task_id"),
+               json.dumps(data.get("evidence_ids", [])), int(bool(data.get("requires_human_action", False))),
+               json.dumps(data["sanitized_tool_call"]) if data.get("sanitized_tool_call") else None,
+               data.get("error"), now, now))
+        return self.list_workflow_items(data["workspace_id"], limit=1)[-1]
+
+    def list_workflow_items(self, workspace_id: str, *, limit: int = 300) -> list[dict]:
+        with self.connection() as db:
+            rows = db.execute("""SELECT * FROM workflow_items WHERE workspace_id=?
+                ORDER BY updated_at DESC LIMIT ?""", (workspace_id, limit)).fetchall()
+        items = []
+        for row in reversed(rows):
+            value = dict(row)
+            value["evidence_ids"] = json.loads(value.pop("evidence_ids_json") or "[]")
+            raw = value.pop("sanitized_tool_call_json")
+            value["sanitized_tool_call"] = json.loads(raw) if raw else None
+            value["requires_human_action"] = bool(value["requires_human_action"])
+            items.append(value)
+        return items
+
+    def upsert_quick_agent_session(self, workspace_id: str, status: str = "idle") -> dict:
+        now = utc_now()
+        with self._lock, self.connection() as db:
+            db.execute("""INSERT INTO quick_agent_sessions (workspace_id,status,updated_at) VALUES (?,?,?)
+                ON CONFLICT(workspace_id) DO UPDATE SET status=excluded.status,updated_at=excluded.updated_at""",
+                (workspace_id, status, now))
+        with self.connection() as db:
+            row = db.execute("SELECT * FROM quick_agent_sessions WHERE workspace_id=?", (workspace_id,)).fetchone()
+        return dict(row)
+
+    def create_quick_agent_task(self, data: dict[str, Any]) -> dict:
+        now = utc_now()
+        with self._lock, self.connection() as db:
+            db.execute("""INSERT INTO quick_agent_tasks (id,workspace_id,status,round,prompt,result_json,created_at,updated_at)
+                VALUES (?,?,?,?,?,?,?,?)""", (data["id"], data["workspace_id"], data["status"],
+                data.get("round", 1), data["prompt"], json.dumps(data.get("result", {})), now, now))
+        return self.get_quick_agent_task(data["id"])
+
+    def get_quick_agent_task(self, task_id: str) -> dict | None:
+        with self.connection() as db:
+            row = db.execute("SELECT * FROM quick_agent_tasks WHERE id=?", (task_id,)).fetchone()
+        return self._decode(row, ("result",))
+
+    def list_quick_agent_tasks(self, workspace_id: str) -> list[dict]:
+        with self.connection() as db:
+            rows = db.execute("SELECT * FROM quick_agent_tasks WHERE workspace_id=? ORDER BY created_at",
+                              (workspace_id,)).fetchall()
+        return [self._decode(row, ("result",)) for row in rows]
+
+    def update_quick_agent_task(self, task_id: str, **fields: Any) -> dict:
+        allowed = {"status", "round"}
+        assignments, values = [], []
+        for name, value in fields.items():
+            if name in allowed:
+                assignments.append(f"{name}=?"); values.append(value)
+        if "result" in fields:
+            assignments.append("result_json=?"); values.append(json.dumps(fields["result"]))
+        if assignments:
+            assignments.append("updated_at=?"); values.extend((utc_now(), task_id))
+            with self._lock, self.connection() as db:
+                db.execute(f"UPDATE quick_agent_tasks SET {', '.join(assignments)} WHERE id=?", values)
+        return self.get_quick_agent_task(task_id)
+
     def create_research(self, data: dict[str, Any]) -> dict:
         now = utc_now()
         with self._lock, self.connection() as db:
@@ -232,21 +392,26 @@ class ResearchStateStore:
                 (id,name,goal,constraints_json,mode,status,budget_total,budget_used,locks_json,
                  created_at,updated_at,budgets_json,geometry_json,material_json,loads_json,
                  boundary_conditions_json,hypothesis,current_question,current_round,locale,defaults_json,
-                 contract_json)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                 contract_json,workspace_id)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (data["id"], data["name"], data["goal"], json.dumps(data["constraints"]),
                  data["mode"], "READY", data["budget_total"], 0, "{}", now, now,
                  json.dumps(data.get("budgets", {})), json.dumps(data.get("geometry", {})),
                  json.dumps(data.get("material", {})), json.dumps(data.get("loads", [])),
                  json.dumps(data.get("boundary_conditions", {})), data.get("hypothesis"),
                  None, 0, data.get("locale", "zh-CN"), json.dumps(data.get("defaults", {})),
-                 json.dumps(data.get("contract", {}))))
+                 json.dumps(data.get("contract", {})), data.get("workspace_id")))
         return self.get_research(data["id"])
 
-    def list_research(self, archived: bool = False) -> list[dict]:
+    def list_research(self, archived: bool = False, workspace_id: str | None = None) -> list[dict]:
         with self.connection() as db:
             operator = "IS NOT NULL" if archived else "IS NULL"
-            rows = db.execute(f"SELECT * FROM research WHERE archived_at {operator} ORDER BY updated_at DESC").fetchall()
+            where = f"archived_at {operator}"
+            params: list[Any] = []
+            if workspace_id is not None:
+                where += " AND workspace_id=?"
+                params.append(workspace_id)
+            rows = db.execute(f"SELECT * FROM research WHERE {where} ORDER BY updated_at DESC", params).fetchall()
         return [self._decode(row, ("constraints", "locks", "budgets", "geometry", "material",
                                    "loads", "boundary_conditions", "defaults", "contract")) for row in rows]
 
@@ -258,7 +423,7 @@ class ResearchStateStore:
 
     def update_research(self, research_id: str, **fields: Any) -> dict:
         allowed = {"name", "goal", "mode", "status", "budget_total", "budget_used",
-                   "hypothesis", "current_question", "current_round", "termination_reason", "locale", "archived_at"}
+                   "hypothesis", "current_question", "current_round", "termination_reason", "locale", "archived_at", "workspace_id"}
         assignments, values = [], []
         for name, value in fields.items():
             if name in allowed:
@@ -486,8 +651,8 @@ class ResearchStateStore:
                  dimension,solver_profile_json,estimated_seconds,estimated_memory_mb,execution_mode,
                  risk,safety_status,approval_required,source_experiment,controlled_factors_json,
                  status,experiment_id,created_at,updated_at,decision_source,intent_source,
-                 policy_version,model,provider,session_id,evidence_ids_json)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                 policy_version,model,provider,session_id,evidence_ids_json,proposal_source,overlay_json)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (data["id"], data["research_id"], data["intent"], data["purpose"],
                   data["fidelity"], data["backend"], json.dumps(data["parameters"]),
                   data["estimated_cost"], data.get("dimension", 2),
@@ -499,19 +664,20 @@ class ResearchStateStore:
                  data.get("experiment_id"), now, now, data.get("decision_source", "HUMAN"),
                  data.get("intent_source", "HUMAN"), data.get("policy_version", "v6-intent-compiler-1"),
                  data.get("model"), data.get("provider"), data.get("session_id"),
-                 json.dumps(data.get("evidence_ids", []))))
+                 json.dumps(data.get("evidence_ids", [])), data.get("proposal_source", "LEGACY_POLICY"),
+                 json.dumps(data.get("overlay", {}))))
         return self.get_proposal(data["id"])
 
     def get_proposal(self, proposal_id: str) -> dict | None:
         with self.connection() as db:
             row = db.execute("SELECT * FROM proposals WHERE id=?", (proposal_id,)).fetchone()
-        return self._decode(row, ("parameters", "solver_profile", "controlled_factors", "evidence_ids"))
+        return self._decode(row, ("parameters", "solver_profile", "controlled_factors", "evidence_ids", "overlay"))
 
     def list_proposals(self, research_id: str) -> list[dict]:
         with self.connection() as db:
             rows = db.execute("SELECT * FROM proposals WHERE research_id=? ORDER BY created_at",
                               (research_id,)).fetchall()
-        return [self._decode(row, ("parameters", "solver_profile", "controlled_factors", "evidence_ids")) for row in rows]
+        return [self._decode(row, ("parameters", "solver_profile", "controlled_factors", "evidence_ids", "overlay")) for row in rows]
 
     def update_proposal(self, proposal_id: str, **fields: Any) -> dict:
         allowed = {"status", "experiment_id", "safety_status"}

@@ -14,7 +14,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 
 from topoptpilot.schemas import ExperimentCreate, ResearchCreate, ToolRequest
-from topoptpilot.schemas.api_contracts import ResearchArchiveResult
+from topoptpilot.schemas.api_contracts import ExperimentDraft, ExperimentDraftValidation, ResearchArchiveResult
 from topoptpilot.api.ws_tickets import broker as ws_ticket_broker
 from topoptpilot.service import ResearchService
 from mcp.matlab_mcp import MatlabMcpError
@@ -217,13 +217,13 @@ async def stream_research(websocket: WebSocket, research_id: str):
         return
 
 
-@app.post("/api/tools/invoke")
-def invoke_tool(request: ToolRequest):
-    try:
-        return {"ok": True, "result": service.tools.invoke(request.research_id, request.tool,
-                                                              request.arguments)}
-    except (KeyError, ValueError, PermissionError) as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+@app.post("/api/tools/invoke", include_in_schema=False)
+def invoke_tool(_: ToolRequest):
+    # Pi accesses the loopback ToolGateway with a process-bound capability, not
+    # this desktop route.  Keeping a deterministic denial prevents browser UI
+    # or extensions from bypassing proposal/approval ownership.
+    raise HTTPException(status_code=403, detail=_api_error(
+        "TOOL_GATEWAY_INTERNAL_ONLY", "Agent tools are available only to the internal Pi gateway", source="AGENT"))
 
 
 @app.get("/api/research/{research_id}")
@@ -338,6 +338,27 @@ def create_experiment(research_id: str, request: ExperimentCreate):
         return service.create_experiment(research_id, request)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise _research_write_conflict(exc) from exc
+
+
+@app.post("/api/research/{research_id}/experiment-drafts/validate", response_model=ExperimentDraftValidation,
+          operation_id="validate_experiment_draft")
+def validate_experiment_draft(research_id: str, request: ExperimentDraft):
+    try:
+        return service.validate_experiment_draft(research_id, request)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=_api_error("RESEARCH_NOT_FOUND", str(exc))) from exc
+    except ValueError as exc:
+        raise _research_write_conflict(exc) from exc
+
+
+@app.post("/api/research/{research_id}/experiments/manual", status_code=201, operation_id="create_manual_experiment")
+def create_manual_experiment(research_id: str, request: ExperimentDraft):
+    try:
+        return service.create_manual_experiment(research_id, request)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=_api_error("RESEARCH_NOT_FOUND", str(exc))) from exc
     except ValueError as exc:
         raise _research_write_conflict(exc) from exc
 
@@ -500,9 +521,11 @@ def clear_cache(request: CacheClearRequest):
 @app.get("/api/report/{research_id}")
 def get_report(research_id: str):
     try:
-        path = service.generate_report(research_id)
+        path = service.report_path(research_id, "markdown")
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=_api_error("FINAL_REPORT_NOT_READY", str(exc), source="AGENT")) from exc
     return FileResponse(path, media_type="text/markdown", filename=f"{research_id}_report.md")
 
 
@@ -512,4 +535,6 @@ def get_report_pdf(research_id: str):
         path = service.report_path(research_id, "pdf")
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=_api_error("FINAL_REPORT_NOT_READY", str(exc), source="AGENT")) from exc
     return FileResponse(path, media_type="application/pdf", filename=f"{research_id}_report.pdf")
